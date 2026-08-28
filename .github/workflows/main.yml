@@ -1,0 +1,93 @@
+name: The Organism
+
+# The organism wakes on a schedule (every 2 hours on the free tier),
+# on new issues (founder communication), and on workflow dispatch.
+on:
+  schedule:
+    - cron: "17 */2 * * *"
+  issues:
+    types: [opened, edited, reopened]
+  issue_comment:
+    types: [created, edited]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: organism
+  cancel-in-progress: false
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 55
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_TOKEN || github.token }}
+
+      - name: Configure Git identity
+        run: |
+          git config user.name "The Organism"
+          git config user.email "organism@localhost"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Install PGP engine
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gnupg
+
+      - name: Wake up
+        id: wake
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
+          ORGANISM_PRIVATE_KEY: ${{ secrets.ORGANISM_PRIVATE_KEY }}
+          FOUNDER_PUBLIC_KEY: ${{ secrets.FOUNDER_PUBLIC_KEY }}
+          FOUNDER_GITHUB_USERNAME: ${{ secrets.FOUNDER_GITHUB_USERNAME }}
+          KILL_PHRASE: ${{ secrets.KILL_PHRASE }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          ORGANISM_WALLET_KEY: ${{ secrets.ORGANISM_WALLET_KEY }}
+          GITHUB_TOKEN: ${{ github.token }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_EVENT_PATH: ${{ github.event_path }}
+        run: python main.py
+
+      - name: Commit memory and reports
+        if: always()
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+          else
+            git commit -m "organism: persist memory and reports [$(date -u +%Y-%m-%dT%H:%M:%SZ)]" \
+              --author "The Organism <organism@localhost>"
+            git push origin HEAD:${GITHUB_REF_NAME}
+          fi
+
+      - name: Notify failure via encrypted issue
+        if: failure() && github.event_name != 'issues'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN || github.token }}
+        run: |
+          gh issue create \
+            --title "[organism] wake cycle failed" \
+            --body "The wake cycle failed. Check the Actions logs for details. — The Organism" \
+            --label "founder" || true

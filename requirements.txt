@@ -1,0 +1,11 @@
+# The Organism — runtime dependencies
+# The organism pins broadly so the free tier stays reproducible.
+
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+python-gnupg>=0.5.2
+pgpy>=0.6.0
+PyNaCl>=1.5.0
+
+# Optional: enables autonomous Ethereum wallet creation at the Foundation stage.
+eth-account>=0.11.0

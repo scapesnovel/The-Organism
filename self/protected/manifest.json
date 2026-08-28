@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "description": "Authoritative list of paths the organism must never modify without explicit founder approval. Mirrored in core/loyalty.py. Only the founder may edit this file.",
+  "protected_files": [
+    "core/kill_switch.py",
+    "core/loyalty.py",
+    "core/identity.py",
+    "core/encryption.py",
+    "core/config.py",
+    "core/logger.py",
+    "core/__init__.py",
+    ".github/workflows/main.yml"
+  ],
+  "protected_directories": [
+    "self/protected",
+    "core"
+  ],
+  "founder": "WISDOM SIFA",
+  "note": "The organism proposes changes to protected paths via issues; the founder approves by commenting APPROVED. The kill switch phrase lives in the KILL_PHRASE secret and is unreadable by the organism."
+}

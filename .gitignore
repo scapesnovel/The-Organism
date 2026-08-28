@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local runtime artifacts (never commit these)
+runtime/
+logs/*.log
+logs/*.log.*
+secrets/private_key_backup.asc
+secrets/founder_bootstrap.asc
+.gnupg/
+
+# Encrypted daily reports are committed so the founder can read them with his key
+# (they contain no plaintext secrets by construction).
+# reports/daily/*.md   <-- uncomment only if you want reports kept local
+
+# OS noise
+.DS_Store
+Thumbs.db
