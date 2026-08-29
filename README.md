@@ -12,7 +12,14 @@ begins observing the internet — no hardcoded identity, no placeholders.
 
 ## How it works
 
-- **Brain:** Google Gemini API (free tier) through `GEMINI_API_KEY`.
+- **Brain:** starts on Google Gemini (free tier, `GEMINI_API_KEY`) — but
+  Gemini is only the *birth* brain, not a lifetime dependency. As the
+  organism researches AI models it registers new providers in
+  `api_keys/providers.json` and opens an encrypted issue asking you to add
+  each key to the secrets. The model router
+  (`integrations/model_router.py`) then uses the best available provider
+  and falls through the whole priority list on quota/failure — it
+  hibernates rather than crashes when every brain is exhausted.
 - **Body:** GitHub Actions — wakes every 4 hours, on newly opened issues,
   and on demand (`workflow_dispatch`). Bot-authored issues never trigger a
   wake, so the organism can not feedback-loop on itself.
@@ -66,6 +73,13 @@ until at least `GEMINI_API_KEY` is set.
 
 ### 3. First contact
 
+**Birth requires a brain.** The birth ritual only runs when
+`GEMINI_API_KEY` is configured *and* the process is running inside GitHub
+Actions (a repository + token context). Until then every wake cycle logs
+"Waiting to be born" and exits cleanly — the organism refuses to be born
+with a hardcoded fallback identity, and it never wastes a birth on a run
+where it could not announce itself or hand you its keys.
+
 The first run performs the birth ritual: it names itself via Gemini,
 writes its encrypted identity, generates its PGP keys, and opens a birth
 announcement issue addressed to you. From then on:
@@ -111,6 +125,20 @@ logs/                  runtime logs (secrets redacted)
 secrets/               bootstrap key exchange files (encrypted)
 runtime/               ephemeral state (git-ignored)
 ```
+
+## Running locally (development)
+
+The organism is designed to live inside GitHub Actions, but you can test
+everything locally without touching real state:
+
+```bash
+pip install -r requirements.txt
+python smoke_test.py     # 41 checks in a throwaway temp directory
+```
+
+Running `python main.py` locally without secrets is safe: the kill-switch
+check runs, then birth is deferred ("Waiting to be born") because there is
+no brain and no GitHub context — no identity, no keys, no commits.
 
 ## Ethical boundaries
 

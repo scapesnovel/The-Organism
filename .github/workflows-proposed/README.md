@@ -23,3 +23,7 @@ What it changes vs. the current workflow:
 - gnupg apt-get install removed (preinstalled on ubuntu-latest)
 - `git pull --rebase` + retries before pushing memory commits
 - failure-notification issue is de-duplicated
+- `ALL_SECRETS: ${{ toJSON(secrets) }}` is exported to the wake step, so
+  any API key the founder adds to the secrets (at the organism's request)
+  becomes usable by the model router on the very next wake — the organism
+  grows beyond Gemini without any further workflow edits

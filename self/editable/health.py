@@ -13,7 +13,7 @@ from typing import Dict, List
 
 from core import config, loyalty
 from core.memory import MemoryManager
-from integrations import gemini_api, github_api, web
+from integrations import github_api, web
 
 LOGGER = logging.getLogger("organism.health")
 
@@ -77,12 +77,16 @@ def run_health_checks(
     page = web.fetch("https://example.com", timeout=15)
     report.add("internet", bool(page))
 
-    # 5. Gemini key validity (minimal probe).
+    # 5. Brain availability. The organism is model-agnostic: ANY registered
+    # provider with a usable key counts as a working brain. A minimal probe
+    # goes through the router so fallback providers are exercised too.
     try:
-        ok = gemini_api.is_healthy()
-        report.add("gemini_key", ok)
+        from integrations import model_router
+
+        answer = model_router.complete("Reply with exactly: OK", max_output_tokens=8)
+        report.add("brain", "ok" in answer.lower())
     except Exception as exc:
-        report.add("gemini_key", False, str(exc))
+        report.add("brain", False, str(exc))
 
     return report
 
@@ -90,10 +94,12 @@ def run_health_checks(
 def diagnose(report: HealthReport) -> List[str]:
     """Turn failed checks into human-readable diagnoses."""
     diagnoses: List[str] = []
-    if report.checks.get("gemini_key") is False:
+    if report.checks.get("brain") is False:
         diagnoses.append(
-            "Gemini API key invalid or quota exhausted. Check GEMINI_API_KEY "
-            "and the free-tier quota. Sleeping and retrying is the default remedy."
+            "No model provider answered (keys invalid or all quotas exhausted). "
+            "Check GEMINI_API_KEY and any registered fallback keys "
+            "(api_keys/providers.json). Hibernating and retrying is the "
+            "default remedy — never crash."
         )
     if report.checks.get("github_api") is False:
         diagnoses.append(
