@@ -541,6 +541,48 @@ def main() -> int:
     status = _router.brain_status()
     check("brain status reports key counts", "key_counts" in status)
 
+    print("== Gemini model rot survival (retired model -> live discovery) ==")
+    from unittest import mock as _mock
+    from integrations import gemini_api as _gapi
+
+    def _fake_post(url, headers=None, json=None, timeout=None):
+        resp = _mock.Mock()
+        if "gemini-9.9-flash" in url:  # the current model, alive
+            resp.status_code = 200
+            resp.json = lambda: {"candidates": [{"content": {"parts": [{"text": "alive"}]}}]}
+        else:  # every older name has been retired by Google
+            resp.status_code = 404
+            resp.text = "not found"
+        return resp
+
+    def _fake_get(url, headers=None, params=None, timeout=None):
+        resp = _mock.Mock()
+        resp.raise_for_status = lambda: None
+        resp.json = lambda: {"models": [
+            {"name": "models/gemini-9.9-flash", "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/gemini-9.9-pro", "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/text-embedding-99", "supportedGenerationMethods": ["embedContent"]},
+            {"name": "models/gemini-9.9-flash-image", "supportedGenerationMethods": ["generateContent"]},
+        ]}
+        return resp
+
+    _gapi._model_cache.clear()
+    os.environ[config.ENV_GEMINI_API_KEY] = "smoke-gemini-key"
+    os.environ[config.ENV_GEMINI_MODEL] = "gemini-1.5-flash"  # retired name
+    with _mock.patch.object(_gapi.requests, "post", _fake_post), \
+         _mock.patch.object(_gapi.requests, "get", _fake_get):
+        answer = _gapi.complete("hi", max_output_tokens=10)
+        check("retired model falls through to live model list", answer == "alive")
+        discovered = _gapi.list_available_models("smoke-gemini-key")
+        check("flash-class preferred first", discovered and discovered[0] == "gemini-9.9-flash")
+        check(
+            "non-text models excluded from brain candidates",
+            all("embedding" not in m and "image" not in m for m in discovered),
+        )
+    _gapi._model_cache.clear()
+    os.environ.pop(config.ENV_GEMINI_MODEL, None)
+    os.environ.pop(config.ENV_GEMINI_API_KEY, None)
+
     print("== Curiosity engine ==")
     from self.editable import curiosity
     from integrations import web as _web
