@@ -570,7 +570,8 @@ def main() -> int:
     os.environ[config.ENV_GEMINI_API_KEY] = "smoke-gemini-key"
     os.environ[config.ENV_GEMINI_MODEL] = "gemini-1.5-flash"  # retired name
     with _mock.patch.object(_gapi.requests, "post", _fake_post), \
-         _mock.patch.object(_gapi.requests, "get", _fake_get):
+         _mock.patch.object(_gapi.requests, "get", _fake_get), \
+         _mock.patch.object(_gapi.time, "sleep", lambda s: None):
         answer = _gapi.complete("hi", max_output_tokens=10)
         check("retired model falls through to live model list", answer == "alive")
         discovered = _gapi.list_available_models("smoke-gemini-key")
@@ -579,6 +580,78 @@ def main() -> int:
             "non-text models excluded from brain candidates",
             all("embedding" not in m and "image" not in m for m in discovered),
         )
+    _gapi._model_cache.clear()
+
+    print("== High-demand slide-down (newest busy -> older answers) ==")
+    # The founder's live probes: gemini-3.7-flash drowning in 503 traffic
+    # while 3.6-flash answers instantly. Newest first, degrade gracefully.
+    _slide_calls = []
+
+    def _fake_post_busy(url, headers=None, json=None, timeout=None):
+        model = url.split("/models/")[1].split(":")[0]
+        _slide_calls.append(model)
+        resp = _mock.Mock()
+        if model == "gemini-3.7-flash":
+            resp.status_code = 503
+            resp.text = "high demand"
+            resp.headers = {}
+        elif model == "gemini-3.6-flash":
+            resp.status_code = 200
+            resp.json = lambda: {"candidates": [{"content": {"parts": [{"text": "from 3.6"}]}}]}
+        else:
+            resp.status_code = 404
+            resp.text = "not found"
+        return resp
+
+    def _fake_get_ladder(url, headers=None, params=None, timeout=None):
+        resp = _mock.Mock()
+        resp.raise_for_status = lambda: None
+        resp.json = lambda: {"models": [
+            {"name": "models/gemini-3.7-flash", "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/gemini-3.6-flash", "supportedGenerationMethods": ["generateContent"]},
+            {"name": "models/gemini-3.5-flash", "supportedGenerationMethods": ["generateContent"]},
+        ]}
+        return resp
+
+    os.environ[config.ENV_GEMINI_MODEL] = "gemini-3.7-flash"
+    with _mock.patch.object(_gapi.requests, "post", _fake_post_busy), \
+         _mock.patch.object(_gapi.requests, "get", _fake_get_ladder), \
+         _mock.patch.object(_gapi.time, "sleep", lambda s: None):
+        answer = _gapi.complete("hi", max_output_tokens=10)
+        check("busy newest model slides down to working sibling", answer == "from 3.6")
+        check(
+            "busy model tried briefly then abandoned (no hammering)",
+            _slide_calls.count("gemini-3.7-flash") == _gapi.MODEL_MAX_ATTEMPTS,
+        )
+        ladder = _gapi.list_available_models("smoke-gemini-key")
+        check(
+            "ladder ordered newest to oldest",
+            ladder == ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash"],
+        )
+
+    # 429 per-model quota: slide immediately, never sleep in CI.
+    _q_calls = []
+
+    def _fake_post_quota(url, headers=None, json=None, timeout=None):
+        model = url.split("/models/")[1].split(":")[0]
+        _q_calls.append(model)
+        resp = _mock.Mock()
+        if model == "gemini-3.7-flash":
+            resp.status_code = 429
+            resp.text = "quota"
+            resp.headers = {}
+        else:
+            resp.status_code = 200
+            resp.json = lambda: {"candidates": [{"content": {"parts": [{"text": "sibling quota ok"}]}}]}
+        return resp
+
+    with _mock.patch.object(_gapi.requests, "post", _fake_post_quota), \
+         _mock.patch.object(_gapi.requests, "get", _fake_get_ladder), \
+         _mock.patch.object(_gapi.time, "sleep", lambda s: None):
+        answer = _gapi.complete("hi", max_output_tokens=10)
+        check("per-model 429 quota slides to sibling immediately", answer == "sibling quota ok")
+        check("429 never retried on the same model", _q_calls.count("gemini-3.7-flash") == 1)
+
     _gapi._model_cache.clear()
     os.environ.pop(config.ENV_GEMINI_MODEL, None)
     os.environ.pop(config.ENV_GEMINI_API_KEY, None)

@@ -20,7 +20,11 @@ LOGGER = logging.getLogger("organism.gemini")
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 LIST_MODELS_URL = "https://generativelanguage.googleapis.com/v1beta/models"
-DEFAULT_MODEL = "gemini-2.5-flash"  # preferred default; override via GEMINI_MODEL
+# Preferred default; override via GEMINI_MODEL. Founder-verified working
+# (2026-08-29). If Google retires or overloads it, the ladder below
+# discovers and uses whatever is actually available — the default is a
+# starting rung, never a dependency.
+DEFAULT_MODEL = "gemini-3.6-flash"
 
 # Model names ROT: Google retires them (gemini-1.5-flash died as a 404 in
 # the founder's own test). We therefore never trust a single hardcoded
@@ -34,7 +38,6 @@ _MODEL_PREFERENCE = ("flash", "pro")
 # ListModels more than once per key.
 _model_cache: dict = {}
 
-MAX_RETRIES = 5
 BASE_BACKOFF_SECONDS = 4
 # Hard wall-clock budget for ONE completion call (request time + backoff
 # sleeps). During a Google outage (503s / read timeouts) unbounded retries
@@ -43,12 +46,10 @@ BASE_BACKOFF_SECONDS = 4
 # the budget is spent we yield: the router rotates to the next key/provider
 # or the organism hibernates until the next wake.
 CALL_BUDGET_SECONDS = 150
-# Bounded quota wait. The previous value (4 HOURS) exceeded the workflow's
-# own timeout and would have burned the entire GitHub Actions free-tier
-# minute budget sleeping. Sleeping is never free inside CI — give quota a
-# short chance to recover, then yield until the next scheduled wake.
-QUOTA_POLL_SECONDS = 30
-QUOTA_MAX_WAIT_SECONDS = 120
+# NOTE: quota sleeping was removed entirely — free-tier quotas are per
+# model, so on 429 the client slides DOWN the model ladder immediately
+# (a sibling model has its own untouched quota); sleeping in CI burns
+# billable minutes for nothing.
 
 
 class GeminiQuotaExhausted(RuntimeError):
@@ -131,52 +132,81 @@ def _version_of(name: str) -> float:
         return 0.0
 
 
+# Per-model attempt cap for TRANSIENT failures (503 high demand, 500,
+# timeouts). Two quick tries, then slide DOWN the version ladder to the
+# next model instead of hammering an overloaded one — the founder's own
+# probes showed gemini-3.7-flash drowning in traffic (503) while 3.6 and
+# 3.5 answered instantly. Newest first, degrade gracefully.
+MODEL_MAX_ATTEMPTS = 2
+
+
 def complete(prompt: str, max_output_tokens: int = 1500, api_key: str = "") -> str:
-    """Run a completion, falling through EVERY currently available model.
+    """Run a completion, sliding down the model ladder until one answers.
 
     ``api_key`` lets the model router rotate through key variants
     (GEMINI_API_KEY, GEMINI_API_KEY_2, ...); when empty, the primary
     environment key is used as before.
 
-    Model fallback: the configured model (GEMINI_MODEL or the default) is
-    tried first. If Google answers 404 (model retired — names rot over the
-    years), the live model list is fetched and every remaining candidate
-    is tried in preference order before giving up.
+    Ladder behaviour (newest → oldest):
+
+    * The configured model (GEMINI_MODEL or default) is tried first.
+    * ``gone`` (404, retired name) → discover the live model list and
+      queue every remaining candidate, newest preferred class first.
+    * ``busy`` (503 high demand / 500 / timeouts after MODEL_MAX_ATTEMPTS,
+      or 429 per-model quota) → fall through to the NEXT model — Gemini
+      free-tier quotas and demand spikes are per model, so a sibling
+      often answers instantly while the newest drowns in traffic.
+    * ``fatal`` (400 bad request / 401 / 403 key rejected) → stop; no
+      model name can fix a broken key or request.
+
+    One shared wall-clock budget (CALL_BUDGET_SECONDS) covers the WHOLE
+    ladder so a bad day still cannot burn CI minutes.
     """
     key = api_key.strip() or _api_key()
+    deadline = time.monotonic() + CALL_BUDGET_SECONDS
     candidates = [_model_name()]
     tried: set = set()
+    discovered = False
     while candidates:
+        if time.monotonic() >= deadline:
+            LOGGER.warning(
+                "Gemini call budget (%ss) spent; yielding so the router can "
+                "rotate keys/providers.", CALL_BUDGET_SECONDS,
+            )
+            return ""
         model = candidates.pop(0)
         if model in tried:
             continue
         tried.add(model)
-        result, model_gone = _complete_with_model(prompt, max_output_tokens, key, model)
-        if result:
-            return result
-        if model_gone:
-            # Discover what models actually exist for this key right now
-            # and queue the ones we have not tried yet.
+        text, verdict = _complete_with_model(prompt, max_output_tokens, key, model, deadline)
+        if verdict == "ok" and text:
+            return text
+        if verdict == "fatal":
+            return ""
+        # "gone" or "busy": widen the ladder once with the live model list,
+        # then keep sliding down to the next candidate.
+        if not discovered:
+            discovered = True
             for name in list_available_models(key):
-                if name not in tried:
+                if name not in tried and name not in candidates:
                     candidates.append(name)
-            if candidates:
-                LOGGER.warning(
-                    "Model '%s' is gone (404); falling through to: %s",
-                    model, ", ".join(candidates[:5]),
-                )
-            continue
-        # Non-404 failure (quota/outage): the model exists but this key or
-        # Google is struggling — switching model names will not help.
-        return ""
+        if candidates:
+            LOGGER.warning(
+                "Model '%s' unavailable (%s); sliding down the ladder to: %s",
+                model, verdict, ", ".join(candidates[:5]),
+            )
     LOGGER.error("Every available Gemini model failed; yielding until next wake.")
     return ""
 
 
 def _complete_with_model(
-    prompt: str, max_output_tokens: int, key: str, model: str
+    prompt: str, max_output_tokens: int, key: str, model: str, deadline: float
 ) -> tuple:
-    """One model attempt. Returns (text, model_gone_404)."""
+    """One model's attempts. Returns (text, verdict).
+
+    verdict: "ok" | "gone" (404 retired) | "busy" (demand/quota/transport)
+    | "fatal" (bad key or bad request — no other model can help).
+    """
     url = BASE_URL.format(model=model)
 
     payload = {
@@ -188,15 +218,9 @@ def _complete_with_model(
     }
 
     attempt = 0
-    deadline = time.monotonic() + CALL_BUDGET_SECONDS
-    while attempt <= MAX_RETRIES:
+    while attempt < MODEL_MAX_ATTEMPTS:
         if time.monotonic() >= deadline:
-            LOGGER.warning(
-                "Gemini call budget (%ss) spent (outage or slow network); "
-                "yielding so the router can rotate keys/providers.",
-                CALL_BUDGET_SECONDS,
-            )
-            return "", False
+            return "", "busy"
         try:
             # The key travels in a header, never in the URL: query strings
             # end up in proxies, error messages and traceback URLs.
@@ -207,9 +231,9 @@ def _complete_with_model(
                 timeout=90,
             )
         except requests.RequestException as exc:
-            LOGGER.warning("Gemini request failed (attempt %s): %s", attempt, exc)
+            LOGGER.warning("Gemini '%s' request failed (attempt %s): %s", model, attempt, exc)
             attempt += 1
-            time.sleep(BASE_BACKOFF_SECONDS * (2 ** min(attempt, 4)))
+            time.sleep(BASE_BACKOFF_SECONDS)
             continue
 
         if response.status_code == 200:
@@ -217,71 +241,53 @@ def _complete_with_model(
                 data = response.json()
                 candidates = data.get("candidates") or []
                 if not candidates:
-                    return "", False
+                    return "", "busy"
                 parts = candidates[0].get("content", {}).get("parts") or []
                 text = "".join(part.get("text", "") for part in parts)
-                return text.strip(), False
+                return text.strip(), "ok"
             except ValueError as exc:
                 LOGGER.error("Could not parse Gemini response: %s", exc)
-                return "", False
+                return "", "busy"
 
-        if response.status_code in (429, 500, 503):
-            retry_after = response.headers.get("Retry-After")
-            try:
-                delay = float(retry_after) if retry_after else BASE_BACKOFF_SECONDS * (2 ** min(attempt, 4))
-            except ValueError:
-                delay = BASE_BACKOFF_SECONDS * (2 ** min(attempt, 4))
+        if response.status_code in (500, 503):
             LOGGER.warning(
-                "Gemini returned %s; retrying in %.0fs (attempt %s)",
-                response.status_code,
-                delay,
-                attempt,
+                "Gemini '%s' returned %s (high demand/outage), attempt %s.",
+                model, response.status_code, attempt,
             )
-            if response.status_code == 429 and attempt >= 2:
-                _wait_for_quota()
-            else:
-                time.sleep(delay)
             attempt += 1
+            time.sleep(BASE_BACKOFF_SECONDS)
             continue
+
+        if response.status_code == 429:
+            # Free-tier quotas are PER MODEL: a sibling model usually has
+            # its own untouched quota. Slide down immediately — no sleeping.
+            LOGGER.warning("Gemini '%s' quota exhausted (429); sliding to next model.", model)
+            return "", "busy"
 
         if response.status_code == 400:
             LOGGER.error("Gemini rejected the request (400): %s", response.text[:300])
-            return "", False
+            return "", "fatal"
 
         if response.status_code in (401, 403):
             LOGGER.error(
                 "Gemini API key rejected (%s). Ask the founder to rotate "
                 "the GEMINI_API_KEY secret.", response.status_code,
             )
-            return "", False
+            return "", "fatal"
 
         if response.status_code == 404:
             # The model was retired — signal the caller to discover live
             # models and fall through, instead of failing the whole call.
             LOGGER.warning("Gemini model '%s' not found (404); will try live model list.", model)
-            return "", True
+            return "", "gone"
 
         LOGGER.error("Gemini unexpected status %s: %s", response.status_code, response.text[:300])
         attempt += 1
-        time.sleep(BASE_BACKOFF_SECONDS * (2 ** min(attempt, 4)))
+        time.sleep(BASE_BACKOFF_SECONDS)
 
-    # Do NOT crash the whole wake cycle over quota: callers treat an empty
-    # string as "no answer this cycle" and simply retry on the next wake.
-    LOGGER.warning("Gemini did not succeed after all retries; yielding until next wake.")
-    return "", False
-
-
-def _wait_for_quota() -> None:
-    """Sleep until the free-tier quota window resets (bounded)."""
-    LOGGER.warning(
-        "Free-tier quota exhausted. Sleeping up to %s seconds before retrying.",
-        QUOTA_MAX_WAIT_SECONDS,
-    )
-    waited = 0
-    while waited < QUOTA_MAX_WAIT_SECONDS:
-        time.sleep(min(QUOTA_POLL_SECONDS, QUOTA_MAX_WAIT_SECONDS - waited))
-        waited += QUOTA_POLL_SECONDS
-        LOGGER.info("Quota wait progress: %ss elapsed.", waited)
+    # Attempts for THIS model spent — the caller slides down the ladder.
+    LOGGER.warning("Gemini '%s' did not answer after %s attempts; sliding down.", model, MODEL_MAX_ATTEMPTS)
+    return "", "busy"
 
 
 def is_healthy() -> bool:
