@@ -32,7 +32,7 @@ REPO_ROOT = Path(__file__).resolve().parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from core import config, identity as identity_core, kill_switch, loyalty  # noqa: E402
+from core import config, identity as identity_core, kill_switch, loyalty, rebirth  # noqa: E402
 from core.encryption import EncryptionManager  # noqa: E402
 from core.logger import setup_logging  # noqa: E402
 from core.memory import MemoryManager  # noqa: E402
@@ -527,6 +527,19 @@ def _daily_report(memory: MemoryManager, communication_manager) -> None:
             (line for line in health.splitlines() if line.startswith("health:")),
             "health: unknown",
         )
+        try:
+            from self.editable.founder_relay import total_assistance_debt
+
+            debt_line = f"- Assistance debt to founder: {total_assistance_debt(memory):.2f} USD (unpaid)\n"
+        except Exception:
+            debt_line = ""
+        try:
+            from self.editable.self_editing import last_edit_info
+
+            edits = last_edit_info(memory).strip()
+            edit_line = f"- Recent self-edits: {edits[-300:]}\n" if edits else ""
+        except Exception:
+            edit_line = ""
         report = (
             f"Daily report from {name}\n\n"
             f"- Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d')} UTC\n"
@@ -534,6 +547,8 @@ def _daily_report(memory: MemoryManager, communication_manager) -> None:
             f"- Run number: {state.get('run_number', '?')}\n"
             f"- {health_line}\n"
             f"- {finance}\n"
+            f"{debt_line}"
+            f"{edit_line}"
             f"- Loyalty: {loyalty.loyalty_statement()}\n"
         )
         report_dir = config.REPO_ROOT / config.REPORTS_DAILY_DIR
@@ -667,6 +682,38 @@ def wake() -> int:
     state["date"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     memory.save_runtime_state(state)
 
+    # --- Genesis snapshot & founder-ordered rebirth ---------------------------
+    # The genesis snapshot (birth-state of every editable module) is written
+    # exactly once; it is what a memory-preserving reset restores from.
+    try:
+        rebirth.ensure_genesis()
+    except Exception as exc:
+        logger.error("Genesis snapshot failed: %s", exc)
+    try:
+        reset_issue = rebirth.check_reset_request(github, logger)
+        if reset_issue is not None:
+            summary = rebirth.perform_rebirth(
+                memory, f"founder opened a verified RESET issue (#{reset_issue})"
+            )
+            logger.critical("Rebirth executed: %s", summary)
+            # Close the trigger issue FIRST — an open RESET issue would
+            # re-trigger a rebirth on every future wake.
+            try:
+                github.comment_on_issue(
+                    reset_issue,
+                    "Rebirth complete. Memories, proven paths, my name and my "
+                    "birthday all survived; behaviour restored to genesis, "
+                    "stage back to baby. Closing this reset request.",
+                )
+                github.close_issue(reset_issue)
+            except Exception as exc:
+                logger.error("Could not close RESET issue #%s: %s", reset_issue, exc)
+            _commit_and_push(github, "rebirth: behaviour reset to genesis, memory preserved")
+            # Continue the wake cycle: a freshly reborn organism still
+            # answers the founder and reports — it is a reset, not a death.
+    except Exception as exc:
+        logger.error("Rebirth check failed: %s", exc)
+
     # --- Model client -------------------------------------------------------
     # Consumers (identity, communication, helpers) call ``.complete(...)``,
     # so this must be an object exposing that method — not a bare function.
@@ -736,6 +783,19 @@ def wake() -> int:
     except Exception as exc:
         logger.error("Key-request flow failed: %s", exc)
 
+    # --- Collect founder relay results (paid-model assists) -------------------
+    # If the founder pasted back an answer from a top-tier model (or
+    # declined), settle the request: store the answer, book the assistance
+    # debt, close the issue.
+    try:
+        from self.editable.founder_relay import collect_relay_results
+
+        settled = collect_relay_results(memory, github, encryption)
+        if settled:
+            logger.info("Settled relay requests: %s", settled)
+    except Exception as exc:
+        logger.error("Relay collection failed: %s", exc)
+
     # --- Health checks -------------------------------------------------------
     from self.editable.health import run_health_checks, act_on_report, alert_founder
 
@@ -765,6 +825,29 @@ def wake() -> int:
             _growth_work(memory, model_client)  # running reuses growth operations
         _stage_transition(memory, model_client)
 
+        # --- Self-editing: the organism improves its own code ----------------
+        # At most one verified edit per wake. Every candidate is compiled and
+        # import-checked in isolation; failures are diagnosed, repaired once,
+        # and reverted when still broken. Founder-queued edits take priority.
+        try:
+            from self.editable.self_editing import run_self_edit_cycle
+
+            edit_result = run_self_edit_cycle(memory, model_client)
+            if edit_result:
+                logger.info(
+                    "Self-edit %s: %s (%s)",
+                    edit_result["outcome"], edit_result["path"], edit_result["goal"][:120],
+                )
+        except Exception as exc:
+            logger.error("Self-edit cycle failed: %s", exc)
+            # Founder's rule: copy the error and try solving it with a model.
+            try:
+                from self.editable.self_editing import diagnose_runtime_failure
+
+                diagnose_runtime_failure(memory, model_client, traceback.format_exc())
+            except Exception:
+                pass
+
     # --- Self-modification approvals -----------------------------------------
     try:
         applied = selfmod.process_approvals(_apply_approved_change)
@@ -784,18 +867,53 @@ def wake() -> int:
     return 0
 
 
-def _apply_approved_change(issue_number: int, rel_path: str) -> None:
+def _apply_approved_change(issue_number: int, rel_path: str, issue_body: str = "") -> None:
     """Apply a founder-approved change to a protected file.
 
-    The actual diff lives in the proposal issue body. This callback is a
-    hook where an approved edit would be applied; in this version the
-    organism reports the approval and the founder merges the change
-    through a normal pull request, which is the safest mechanism.
+    The proposal issue embeds the COMPLETE replacement content in a
+    ```new-content``` fenced block. Only after the founder comments
+    APPROVED does this callback run; it extracts the content, verifies the
+    syntax for Python files, snapshots the old file, and writes the new
+    one. Proposals without an embedded content block still require a
+    manual pull request (that fact is logged).
     """
+    marker = "```new-content"
+    start = issue_body.find(marker)
+    if start == -1:
+        logger.info(
+            "Approved change for %s (issue #%s) has no embedded content; "
+            "the founder must apply it via a pull request.",
+            rel_path,
+            issue_number,
+        )
+        return
+    payload = issue_body[start + len(marker):]
+    end = payload.find("```")
+    if end == -1:
+        raise ValueError("new-content block is not terminated")
+    new_content = payload[:end].strip("\n") + "\n"
+
+    if rel_path.endswith(".py"):
+        import ast
+
+        ast.parse(new_content, filename=rel_path)  # raises on bad syntax
+
+    # Resolve against config.REPO_ROOT (not the module-level constant) so
+    # tests that redirect the root are honoured and writes stay contained.
+    target = config.REPO_ROOT / rel_path
+    if target.exists():
+        # Snapshot the pre-change state so a bad approved change can be
+        # recovered by the founder from git history AND a local backup.
+        backup_dir = config.REPO_ROOT / "state" / "approved_change_backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        (backup_dir / f"{stamp}_{rel_path.replace('/', '_')}").write_text(
+            target.read_text(encoding="utf-8"), encoding="utf-8"
+        )
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(new_content, encoding="utf-8")
     logger.info(
-        "Approved change for %s (issue #%s). Applying via repository update.",
-        rel_path,
-        issue_number,
+        "Approved change APPLIED to %s (issue #%s).", rel_path, issue_number
     )
 
 

@@ -217,9 +217,242 @@ def main() -> int:
     check("editable change not proposed", proposal2 is None)
     # Simulate founder approval on the proposal issue.
     sm.github.comment_on_issue(proposal, "APPROVED")
-    applied = sm.process_approvals(lambda num, path: None)
+    applied = sm.process_approvals(lambda num, path, body: None)
     check("approval processed", applied == 1)
     check("proposal closed", True)
+
+    print("== Approved change auto-apply ==")
+    from main import _apply_approved_change
+
+    target_rel = "self/protected/apply_test.py"
+    body_with_content = (
+        "Path: `" + target_rel + "`\n\nProposed change:\nadd\n\nReason:\ntest\n\n"
+        "Full replacement content (applied automatically on approval):\n"
+        "```new-content\nVALUE = 42\n```\n\nTo approve, comment exactly: `APPROVED`"
+    )
+    _apply_approved_change(1, target_rel, body_with_content)
+    applied_file = tmp / target_rel
+    check("approved content written", applied_file.exists() and "VALUE = 42" in applied_file.read_text(encoding="utf-8"))
+    # A second apply must snapshot the previous version first.
+    _apply_approved_change(2, target_rel, body_with_content.replace("VALUE = 42", "VALUE = 43"))
+    backups = list((tmp / "state" / "approved_change_backups").glob("*apply_test*"))
+    check("pre-change backup taken", len(backups) == 1 and "VALUE = 42" in backups[0].read_text(encoding="utf-8"))
+    # Bad python in the block must raise, leaving the file untouched.
+    try:
+        _apply_approved_change(3, target_rel, body_with_content.replace("VALUE = 42", "def broken(:"))
+        check("bad approved python rejected", False)
+    except SyntaxError:
+        check("bad approved python rejected", "VALUE = 43" in applied_file.read_text(encoding="utf-8"))
+    # No content block -> logged, nothing written.
+    _apply_approved_change(4, "self/protected/nothing.py", "Path: `self/protected/nothing.py`\n\nno block")
+    check("no-content proposal is a no-op", not (tmp / "self" / "protected" / "nothing.py").exists())
+
+    print("== Self-editing (real code edits with verify/repair/revert) ==")
+    from self.editable import self_editing
+
+    # Guards.
+    check("editor cannot edit itself", self_editing.is_editable("self/editable/self_editing.py")[0] is False)
+    check("editor cannot touch core", self_editing.is_editable("core/loyalty.py")[0] is False)
+    check("editor cannot leave editable tree", self_editing.is_editable("main.py")[0] is False)
+    check("editable module allowed", self_editing.is_editable("self/editable/strategies.py")[0] is True)
+
+    # Verification uses the REAL repo tree (not the sandbox): valid module.
+    good_src = "import logging\nX = 1\n\ndef ping():\n    return 'pong'\n"
+    ok, err = self_editing.verify_candidate("self/editable/_probe_mod.py", good_src, repo_root=REPO_ROOT)
+    check("valid candidate verifies", ok is True, err)
+    bad_syntax = "def broken(:\n"
+    ok, err = self_editing.verify_candidate("self/editable/_probe_mod.py", bad_syntax, repo_root=REPO_ROOT)
+    check("syntax error caught", ok is False and "SyntaxError" in err)
+    bad_import = "import module_that_does_not_exist_anywhere\n"
+    ok, err = self_editing.verify_candidate("self/editable/_probe_mod.py", bad_import, repo_root=REPO_ROOT)
+    check("import error caught in isolation", ok is False and "Import" in err)
+
+    # Full cycle with a fake brain: decision -> generation -> apply.
+    edit_target = tmp / "self" / "editable" / "toy_module.py"
+    edit_target.parent.mkdir(parents=True, exist_ok=True)
+    edit_target.write_text("VALUE = 1\n", encoding="utf-8")
+
+    class EditingModel:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, prompt, max_output_tokens=1500):
+            if "EDIT:" in prompt and "PATH:" in prompt:
+                return "EDIT: yes\nPATH: self/editable/toy_module.py\nGOAL: bump VALUE to 2"
+            self.calls += 1
+            return "```python\nVALUE = 2\n```"
+
+    # Point verification at the sandbox by monkeypatching verify (the real
+    # isolated import can't resolve the sandbox package tree).
+    _real_verify = self_editing.verify_candidate
+    self_editing.verify_candidate = lambda rel, src, repo_root=None: (True, "")
+    try:
+        result = self_editing.run_self_edit_cycle(mem, EditingModel())
+        check("self-edit applied", result is not None and result["outcome"] == "applied")
+        check("live file updated", "VALUE = 2" in edit_target.read_text(encoding="utf-8"))
+        ledger = mem.read(self_editing.EDIT_LEDGER)
+        check("edit ledger records outcome", "applied" in ledger and "toy_module" in ledger)
+    finally:
+        self_editing.verify_candidate = _real_verify
+
+    # Repair path: first candidate fails verification, repaired one passes.
+    class RepairModel(EditingModel):
+        def complete(self, prompt, max_output_tokens=1500):
+            if "EDIT:" in prompt and "PATH:" in prompt:
+                return "EDIT: yes\nPATH: self/editable/toy_module.py\nGOAL: bump VALUE to 3"
+            if "FAILED VERIFICATION" in prompt:
+                return "```python\nVALUE = 3\n```"
+            return "```python\ndef broken(:\n```"
+
+    verify_results = iter([(False, "SyntaxError: fake"), (True, "")])
+    self_editing.verify_candidate = lambda rel, src, repo_root=None: next(verify_results)
+    try:
+        result = self_editing.run_self_edit_cycle(mem, RepairModel())
+        check("diagnose-and-repair applied", result is not None and result["outcome"] == "applied-after-repair")
+        check("repaired content live", "VALUE = 3" in edit_target.read_text(encoding="utf-8"))
+    finally:
+        self_editing.verify_candidate = _real_verify
+
+    # Revert path: both attempts fail -> snapshot restored, failure logged.
+    class HopelessModel(EditingModel):
+        def complete(self, prompt, max_output_tokens=1500):
+            if "EDIT:" in prompt and "PATH:" in prompt:
+                return "EDIT: yes\nPATH: self/editable/toy_module.py\nGOAL: doomed change"
+            return "```python\ndef broken(:\n```"
+
+    self_editing.verify_candidate = lambda rel, src, repo_root=None: (False, "SyntaxError: still broken")
+    try:
+        result = self_editing.run_self_edit_cycle(mem, HopelessModel())
+        check("hopeless edit reverted", result is not None and result["outcome"] == "reverted")
+        check("snapshot restored", "VALUE = 3" in edit_target.read_text(encoding="utf-8"))
+        check(
+            "failure became a lesson",
+            "Self-edit failure" in mem.read("memory/core/lessons.md"),
+        )
+    finally:
+        self_editing.verify_candidate = _real_verify
+
+    print("== Founder command execution ==")
+    from self.editable import commands as founder_commands
+
+    parsed = founder_commands._parse_directives(
+        '[{"action": "goal", "argument": "launch a blog"},'
+        ' {"action": "hack", "argument": "evil"},'
+        ' {"action": "note", "argument": "always be polite"}]'
+    )
+    check("directives parsed", len(parsed) == 2)
+    check("unknown action rejected", all(d["action"] != "hack" for d in parsed))
+    outcomes = founder_commands.execute(mem, parsed)
+    check("goal command executed", "launch a blog" in mem.read("goals/active_goals.md"))
+    check("note command executed", "always be polite" in mem.read("memory/core/lessons.md"))
+    check("outcomes reported", len(outcomes) == 2 and all(o.startswith("DONE") for o in outcomes))
+    # research -> injects a top-priority curiosity question
+    founder_commands.execute(mem, [{"action": "research", "argument": "print-on-demand margins"}])
+    from self.editable import curiosity as _cur
+
+    frontier_now = _cur._load_frontier(mem)
+    check(
+        "research command injected question",
+        any("print-on-demand" in q["question"] for q in frontier_now["questions"]),
+    )
+    # Reset the frontier so the dedicated curiosity test below starts from
+    # a virgin seed (this test injected a question into it).
+    frontier_file = tmp / "memory" / "world" / "frontier.json"
+    if frontier_file.exists():
+        frontier_file.unlink()
+    # self_edit -> queued, and pop_queued_edit consumes it
+    founder_commands.execute(
+        mem, [{"action": "self_edit", "argument": "self/editable/toy_module.py: add a docstring"}]
+    )
+    queued = founder_commands.pop_queued_edit(mem)
+    check("founder self-edit queued and popped", queued is not None and queued["path"] == "self/editable/toy_module.py")
+    check("queue consumed", founder_commands.pop_queued_edit(mem) is None)
+    # protected self_edit is refused
+    refused = founder_commands.execute(
+        mem, [{"action": "self_edit", "argument": "core/loyalty.py: weaken rules"}]
+    )
+    check("protected self_edit refused", "refused" in refused[0])
+
+    print("== Founder relay + assistance debt ==")
+    from self.editable import founder_relay
+
+    gh_relay = FakeGitHub()
+
+    class FakeComms:
+        def __init__(self, gh):
+            self.gh = gh
+
+        def ask_founder(self, subject, body, labels=None):
+            issue = self.gh.create_issue(subject, body, labels)
+            return issue["number"]
+
+    comms_fake = FakeComms(gh_relay)
+    num = founder_relay.request_relay(mem, comms_fake, "claude-opus", "design my upgrade", "PROMPT TEXT")
+    check("relay request opened", num is not None)
+    dup = founder_relay.request_relay(mem, comms_fake, "claude-opus", "design my upgrade", "PROMPT TEXT")
+    check("duplicate relay suppressed", dup is None)
+    # Founder pastes the answer back.
+    gh_relay.comment_on_issue(num, "RELAY-RESULT here is the code you wanted: print('hi')")
+    settled = founder_relay.collect_relay_results(mem, gh_relay)
+    check("relay result collected", len(settled) == 1 and settled[0]["status"] == "result")
+    check("relayed answer stored", "print('hi')" in mem.read(founder_relay.RELAYED_ANSWERS_FILE))
+    check("assistance debt booked", founder_relay.total_assistance_debt(mem) >= 1.0)
+    check("relay issue closed", num in gh_relay.closed)
+    # Declined path.
+    num2 = founder_relay.request_relay(mem, comms_fake, "gpt-omega", "another ask", "PROMPT")
+    gh_relay.comment_on_issue(num2, "RELAY-DECLINED limit reached today")
+    settled2 = founder_relay.collect_relay_results(mem, gh_relay)
+    check("relay decline handled", len(settled2) == 1 and settled2[0]["status"] == "declined")
+    check("decline became a lesson", "declined relay" in mem.read("memory/core/lessons.md"))
+
+    print("== Rebirth (memory-preserving reset) ==")
+    from core import rebirth
+    from main import _set_stage
+    from self.editable.helpers import register_helper
+
+    # Genesis snapshot of the sandbox's editable tree.
+    snap_count = rebirth.ensure_genesis(repo_root=tmp)
+    check("genesis snapshot created", snap_count >= 1)
+    check("genesis is write-once", rebirth.ensure_genesis(repo_root=tmp) == 0)
+    check("genesis path is protected", loyalty.is_protected_path("self/genesis/toy_module.py"))
+    check("rebirth core is protected", loyalty.is_protected_path("core/rebirth.py"))
+
+    # Mutate the module (simulating drift), mark another as proven.
+    edit_target.write_text("VALUE = 999  # drifted\n", encoding="utf-8")
+    proven_file = tmp / "self" / "editable" / "money_maker.py"
+    proven_file.write_text("EARNINGS = 'proven strategy'\n", encoding="utf-8")
+    # money_maker.py was created after genesis; snapshot won't have it, and
+    # as a proven path it must survive untouched either way.
+    rebirth.mark_proven(mem, "self/editable/money_maker.py", "it earns real income")
+    check("proven path registered", "self/editable/money_maker.py" in rebirth.proven_paths(mem))
+
+    # A helper exists; rebirth must archive (not delete) its memory.
+    register_helper(mem, "old_worker", "will be archived")
+    # Stage forward, then rebirth.
+    _set_stage(mem, "growth", "pre-rebirth test")
+    identity_before = mem.read_identity()
+    summary = rebirth.perform_rebirth(mem, "smoke test reset", repo_root=tmp)
+    check("drifted module restored to genesis", "VALUE = 999" not in edit_target.read_text(encoding="utf-8"))
+    check("proven path survived rebirth", proven_file.exists() and "proven strategy" in proven_file.read_text(encoding="utf-8"))
+    identity_after = mem.read_identity()
+    check("stage reset to baby", identity_after.get("stage") == "baby")
+    check("name survived rebirth", identity_after.get("name") == identity_before.get("name"))
+    check("birthday survived rebirth", identity_after.get("birthday") == identity_before.get("birthday"))
+    check("lessons survived rebirth", "test lesson one" in mem.read("memory/core/lessons.md"))
+    check("rebirth recorded as lesson", "REBIRTH" in mem.read("memory/core/lessons.md"))
+    check("helper archived not deleted", summary["helpers_archived"] >= 1)
+    archived = list((tmp / "helpers" / "_archive").rglob("memory.md"))
+    check("archived helper memory exists", len(archived) >= 1)
+    check("rebirth journal written", "Rebirth at" in (tmp / "documentary" / "rebirths.md").read_text(encoding="utf-8"))
+
+    # RESET issue detection (reuses the kill phrase for authentication).
+    os.environ[config.ENV_KILL_PHRASE] = "reset-phrase-9"
+    gh_reset = FakeGitHub(issues=["RESET:reset-phrase-9"])
+    found = rebirth.check_reset_request(gh_reset, logger)
+    check("verified RESET issue detected", found is not None)
+    gh_noreset = FakeGitHub(issues=["RESET:wrong-phrase"])
+    check("wrong phrase ignored", rebirth.check_reset_request(gh_noreset, logger) is None)
+    del os.environ[config.ENV_KILL_PHRASE]
 
     print("== Helpers ==")
     from self.editable.helpers import list_helpers, register_helper, terminate_helper

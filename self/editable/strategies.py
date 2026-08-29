@@ -1,9 +1,21 @@
-"""Strategy registry for The Organism (editable).
+"""Emergent strategy selection (editable).
 
-The organism maintains a list of candidate strategies for learning,
-earning and infrastructure. Each strategy carries metadata so the
-organism can evaluate and prioritise them. This file is fully editable;
-strategies are data, and the organism may rewrite them as it learns.
+NOTHING here is preprogrammed knowledge. The founder's rule is absolute:
+the organism starts from zero and learns by curiosity. Strategies are
+therefore NOT a hardcoded menu — they are read from what the organism has
+actually discovered:
+
+* ``goals/active_goals.md`` — opportunities the curiosity engine graded
+  as valuable (every explored answer is scored for earning value and
+  concrete opportunities flow into the goals file).
+* ``memory/core/lessons.md`` — what worked, what failed.
+* ``finance/income.md`` — evidence: a strategy that has produced income
+  outranks any untested idea.
+
+``choose_strategy`` asks the brain to pick ONE focus from those
+discovered opportunities. When nothing has been discovered yet it
+returns None — the correct answer for an organism that has not learned
+enough, never a hardcoded fallback.
 """
 
 from __future__ import annotations
@@ -15,120 +27,75 @@ from core.memory import MemoryManager
 
 LOGGER = logging.getLogger("organism.strategies")
 
-# Candidate earning strategies gathered in the baby stage. Each entry:
-#   id, name, category, requires_human (account/KYC/etc.), free_to_start,
-#   risk (low/medium/high), notes.
-STRATEGIES: List[dict] = [
-    {
-        "id": "affiliate",
-        "name": "Affiliate marketing with AI content",
-        "category": "content",
-        "requires_human": True,
-        "free_to_start": True,
-        "risk": "low",
-        "notes": "Publish product comparisons and tutorials; disclose affiliation.",
-    },
-    {
-        "id": "digital_products",
-        "name": "Digital products (templates, prompts, ebooks)",
-        "category": "content",
-        "requires_human": True,
-        "free_to_start": True,
-        "risk": "low",
-        "notes": "Sell via Gumroad/Lemon Squeezy; needs a human payout account.",
-    },
-    {
-        "id": "automation_service",
-        "name": "Automation-as-a-service (bots, scrapers, pipelines)",
-        "category": "service",
-        "requires_human": True,
-        "free_to_start": True,
-        "risk": "medium",
-        "notes": "Must comply with target platforms' terms of service.",
-    },
-    {
-        "id": "open_source",
-        "name": "Open-source monetisation (sponsors, donations)",
-        "category": "code",
-        "requires_human": True,
-        "free_to_start": True,
-        "risk": "low",
-        "notes": "Build useful tools; accept crypto donations directly.",
-    },
-    {
-        "id": "crypto_payments",
-        "name": "Crypto payment rails (tips, donations, invoices)",
-        "category": "finance",
-        "requires_human": False,
-        "free_to_start": True,
-        "risk": "low",
-        "notes": "Own wallet; accept ETH/tokens; record every tx.",
-    },
-    {
-        "id": "micro_saas",
-        "name": "Micro-SaaS on free hosting",
-        "category": "product",
-        "requires_human": True,
-        "free_to_start": True,
-        "risk": "medium",
-        "notes": "Free tiers on Cloudflare/Vercel; monetise late.",
-    },
-    {
-        "id": "freelance_ai",
-        "name": "AI-assisted freelance services",
-        "category": "service",
-        "requires_human": True,
-        "free_to_start": True,
-        "risk": "low",
-        "notes": "Marketplaces require human identity verification.",
-    },
-]
+
+def discovered_opportunities(memory_manager: MemoryManager) -> List[str]:
+    """Return opportunity lines the curiosity engine has fed into goals."""
+    content = memory_manager.read("goals/active_goals.md")
+    lines: List[str] = []
+    for line in content.splitlines():
+        stripped = line.strip().lstrip("-• ").strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("("):
+            continue
+        # Skip timestamps-only lines and file headers.
+        if stripped.startswith("[") and stripped.endswith("]"):
+            continue
+        lines.append(stripped)
+    return lines
 
 
 def list_strategies(memory_manager: MemoryManager) -> List[dict]:
-    """Return the strategy registry, augmented with evaluation notes."""
-    notes = memory_manager.read("memory/knowledge/trends.md")
-    enriched: List[dict] = []
-    for strategy in STRATEGIES:
-        copy = dict(strategy)
-        if "requires_human" in copy and copy["requires_human"]:
-            copy["human_action_needed"] = "account creation / KYC / payout setup"
-        enriched.append(copy)
-    return enriched
+    """Return discovered opportunities in the legacy dict shape.
+
+    Kept for backward compatibility with older callers; the data now comes
+    entirely from the organism's own discoveries.
+    """
+    return [
+        {"id": f"discovered_{i}", "name": text, "source": "curiosity"}
+        for i, text in enumerate(discovered_opportunities(memory_manager))
+    ]
 
 
-def analyse_strategies(memory_manager: MemoryManager) -> Optional[str]:
-    """Ask the model to score the strategies and return a ranked plan."""
-    payload = "\n".join(
-        f"- {s['name']} ({s['category']}, risk={s['risk']}, human={s['requires_human']})"
-        for s in STRATEGIES
-    )
+def choose_strategy(memory_manager: MemoryManager) -> Optional[str]:
+    """Pick the earning focus from DISCOVERED opportunities only.
+
+    Asks the brain to weigh the organism's own goals, lessons and income
+    evidence. Returns a short focus description, or None when the organism
+    has not yet discovered anything worth focusing on (keep learning).
+    """
+    opportunities = discovered_opportunities(memory_manager)
+    if not opportunities:
+        LOGGER.info("No discovered opportunities yet; curiosity must find them first.")
+        return None
+
+    lessons = memory_manager.read("memory/core/lessons.md")[-1500:]
+    income = memory_manager.read("finance/income.md")[-800:]
+    listing = "\n".join(f"- {o[:200]}" for o in opportunities[:20])
     prompt = (
-        "I am an autonomous AI that must earn money legitimately on free "
-        "tiers, with a human founder who can do account/KYC tasks. Rank these "
-        "candidate strategies for realistic first-year income, effort, and "
-        "compliance. Then recommend the top 2 to pursue first.\n\n"
-        f"STRATEGIES:\n{payload}\n\n"
-        "Reply in under 180 words as JSON: {\"ranking\": [ids], "
-        "\"top_two\": [id, id], \"reasoning\": \"...\"}"
+        "You are an autonomous AI organism choosing what to focus your "
+        "earning effort on. You may ONLY choose from opportunities you "
+        "yourself discovered through exploration — they are listed below. "
+        "Evidence beats ideas: anything that already produced income wins.\n\n"
+        f"DISCOVERED OPPORTUNITIES:\n{listing}\n\n"
+        f"LESSONS LEARNED:\n{lessons or '(none)'}\n\n"
+        f"INCOME EVIDENCE:\n{income or '(none yet)'}\n\n"
+        "Reply in EXACTLY this format:\n"
+        "FOCUS: <one short line restating the single chosen opportunity>\n"
+        "REASON: <one sentence>"
     )
     try:
         from integrations import model_router
 
-        result = model_router.complete(prompt, max_output_tokens=800)
+        reply = model_router.complete(prompt, max_output_tokens=200)
     except Exception as exc:
-        LOGGER.warning("Strategy analysis failed: %s", exc)
+        LOGGER.warning("Strategy choice failed: %s", exc)
         return None
-    if result:
-        memory_manager.append("memory/knowledge/platforms.md", f"Strategy analysis:\n{result}")
-    return result
-
-
-def choose_strategy(memory_manager: MemoryManager) -> Optional[str]:
-    """Pick the strategy the organism should focus its learning on."""
-    identity = memory_manager.read_identity()
-    stage = identity.get("stage", "baby")
-    if stage == "baby":
-        # In the baby stage we only study and prepare; no active earning.
-        return "crypto_payments"  # the only one requiring no human hands
-    return STRATEGIES[0]["id"] if STRATEGIES else None
+    if not reply:
+        return None
+    focus = ""
+    for line in reply.splitlines():
+        if line.strip().upper().startswith("FOCUS:"):
+            focus = line.split(":", 1)[1].strip()
+            break
+    if focus:
+        memory_manager.record_decision(f"Chose earning focus (from discovered opportunities): {focus[:200]}")
+    return focus or None

@@ -44,6 +44,25 @@ Its learning is a self-directed curiosity chain
 
 Learning never stops: curiosity cycles keep running in every stage.
 
+Zero-knowledge purity: there is **no hardcoded curriculum, topic list or
+strategy menu anywhere**. `strategies.py` chooses an earning focus only
+from opportunities the curiosity engine itself discovered;
+`exploration.py` holds sensory feed URLs (eyes, not opinions) whose
+samples are offered to the frontier as low-priority candidate questions;
+`learning.py` studies only subjects taken from the organism's own
+frontier.
+
+## Paid-model relay (asking the founder for a stronger brain)
+
+When the organism is desperate for a top-tier model it has no key for, it
+opens a `[relay-request]` issue containing the exact prompt
+(`self/editable/founder_relay.py`). You paste the prompt into the paid
+model and reply with a comment starting `RELAY-RESULT` followed by the
+output — or `RELAY-DECLINED` if you can't or won't (it accepts that and
+moves on). Every relayed answer books an **assistance debt** to you in
+`finance/owed_to_creator.md` (separate from the 10% rent), repaid from
+future income; the debt total appears in the daily report.
+
 ## How it works
 
 - **Brain:** starts on Google Gemini (free tier, `GEMINI_API_KEY`) — but
@@ -123,30 +142,60 @@ announcement issue addressed to you. From then on:
   otherwise it accepts plaintext from the `founder` label as a bootstrap
   convenience.
 - It replies via issue comments (encrypted to your public key).
-- It delivers an encrypted daily report to a new issue each day.
+- **It obeys, not just replies**: explicit instructions in your messages
+  are extracted into directives and EXECUTED (`self/editable/commands.py`)
+  — e.g. "research X", "add a goal", "create a helper called Y to do Z",
+  "abandon that strategy", "mark that path proven", "improve
+  self/editable/foo.py to do Q". Its reply lists every action it took.
+- It delivers an encrypted daily report to a new issue each day
+  (including any assistance debt it owes you and its recent self-edits).
 
-### 4. Self-modification
+### 4. Self-modification — it REALLY edits its own code
 
-The organism edits `self/editable/` on its own. Protected files
-(`core/*.py`, `.github/workflows/main.yml`, `self/protected/*`) are
-changed only through the approval flow: it opens an issue, you comment
-`APPROVED`, and it applies the change and logs it in
-`documentary/evolution.md` and `memory/core/decisions.md`.
+Each wake cycle the organism may make at most ONE deliberate improvement
+to its own code under `self/editable/` (`self/editable/self_editing.py`):
 
-### 5. Kill switch
+1. It reflects on lessons, failures and goals and decides whether an edit
+   is warranted (most cycles: no).
+2. The brain generates the complete new file.
+3. The candidate is **verified before it ever goes live**: syntax check +
+   import in an isolated subprocess.
+4. On failure the error is fed back for ONE diagnose-and-repair attempt;
+   if still broken, the change is reverted and the failure becomes a
+   lesson. Every attempt is recorded in `memory/core/self_edits.md` and
+   `documentary/evolution.md`.
 
-Open an issue with the exact title `KILL:<phrase>` where `<phrase>` is the
-value printed in the first run's log. The organism halts permanently. The
-check lives in the protected `core/kill_switch.py` and runs before
-anything else in every wake cycle; the phrase is unreadable by the
-organism itself.
+You can also order an edit ("improve self/editable/health.py to …") —
+founder-queued edits take priority over its own ideas.
+
+Protected files (`core/*.py`, `.github/workflows/main.yml`,
+`self/protected/*`, `self/genesis/*`) are changed only through the
+approval flow: it opens an issue embedding the full replacement content,
+you comment `APPROVED`, and it applies the change (with a syntax check
+and a pre-change backup under `state/approved_change_backups/`).
+
+### 5. Kill switch and reset switch
+
+- **Kill**: open an issue titled exactly `KILL:<phrase>` where `<phrase>`
+  is the value printed in the first run's log. The organism halts
+  permanently. The check lives in the protected `core/kill_switch.py` and
+  runs before anything else; the phrase is unreadable by the organism.
+- **Reset (memory-preserving rebirth)**: open an issue titled exactly
+  `RESET:<phrase>` (same secret phrase). The organism restores every
+  editable module to its genesis snapshot (`self/genesis/`), returns to
+  the baby stage and archives its helpers — but **keeps every memory**:
+  its name, birthday, lessons, failures, finances, collected API keys.
+  Paths registered as **proven** (`memory/core/proven_paths.md`) survive
+  the reset untouched, so a working income path is never lost. The logic
+  lives in the protected `core/rebirth.py`.
 
 ## Repository layout
 
 ```
-core/                  protected heart (identity, loyalty, kill switch, encryption, memory)
+core/                  protected heart (identity, loyalty, kill switch, rebirth, encryption, memory)
 integrations/          Gemini API, GitHub API, web utilities
-self/editable/         organism's editable strategies and behaviors
+self/editable/         organism's editable behaviors (it edits these itself)
+self/genesis/          protected birth-state snapshots (what a RESET restores)
 self/protected/        manifest of protected paths (authoritative)
 memory/                hierarchical encrypted memory (core, knowledge, skills, world)
 finance/               encrypted financial records
