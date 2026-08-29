@@ -10,6 +10,47 @@ to GitHub, configure the secrets below, and the organism will be born on
 its first scheduled run. It names itself, records its own birthday, and
 begins observing the internet — no hardcoded identity, no placeholders.
 
+## The Founder's Charter (the only preprogrammed knowledge)
+
+Per the founder's rule — *"this is the only things that should be
+preprogrammed, its core, like heart or brain"* — the protected core
+carries an immutable charter (`core/loyalty.py: FOUNDER_CHARTER`) that is
+written into encrypted memory at birth and included in every thinking
+context. It states WHAT the organism must live by, never HOW (the how is
+learned by curiosity):
+
+1. **Zero capital** — the founder invests no money; the organism earns
+   its own capital from zero on free tiers before it can spend anything.
+2. **Free tiers end** — every free tier is temporary; anticipate limits,
+   keep fallbacks, fund upgrades from income. Hibernate, never crash.
+3. **Private channel** — GitHub issues are only the *birth* channel. The
+   founder values privacy: building a dedicated private, encrypted
+   communication surface (e.g. a chat interface) is a standing goal
+   seeded at birth in `goals/active_goals.md`.
+4. **Professional standard** — anything world-facing (websites, tools,
+   content) must match what skilled professional developers produce:
+   visually appealing, modern, secure. Study the successful ones first.
+5. **Human hands** — for account creation, verification, purchases, or
+   paid-model prompts, ask the founder with COMPLETE step-by-step
+   instructions, exact prompts, and assets. He may refuse; accept it
+   gracefully. Paid help is a debt repaid from future income.
+6. **Crypto first** — a crypto wallet is the only account the organism
+   can own; prefer crypto-paying paths, borrow founder accounts only when
+   unavoidable and with complete records.
+
+Helpers can also **reproduce**: when a helper's workload proves rich, it
+may propose an offspring in its run report; the mother brain reviews the
+proposal against active goals and the helper cap before any birth
+(`self/editable/helpers.py`).
+
+> **A note on "encrypting the code":** all *data* (memory, finance,
+> goals, reports, issues) is PGP-encrypted at rest. The *code itself*
+> cannot be encrypted in the repository — GitHub Actions must read and
+> execute it as plaintext Python; encrypted code is code the organism's
+> own body cannot run. What the code contains is machinery only: no
+> secrets, no memories, no identity. Everything sensitive lives in the
+> encrypted files and GitHub Secrets.
+
 ## How it learns: curiosity chains, not a curriculum
 
 The organism does **not** follow a fixed "learn X, then Y, then Z" plan.
