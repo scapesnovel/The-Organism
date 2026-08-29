@@ -187,64 +187,120 @@ def _handle_birth(model_client, memory: MemoryManager, encryption: Optional[Encr
 
 
 # ---------------------------------------------------------------------------
-# Stage evaluation
+# Stage evaluation — SELF-DETERMINED, not a hardcoded checklist.
+#
+# The organism advances a stage only when IT believes it is ready, via an
+# honest model-mediated self-assessment grounded in its own curiosity
+# frontier and memory. A minimal safety floor (working self-test, active
+# encryption, a non-trivial amount of explored curiosity) prevents a
+# tick-2 delusion from advancing an empty mind, but the decision itself is
+# the organism's own.
 # ---------------------------------------------------------------------------
+def _self_assess_readiness(memory: MemoryManager, model_client, stage: str, next_stage: str) -> tuple:
+    """Ask the organism itself whether it is ready to advance.
+
+    Returns (ready: bool, reasoning: str). Fails closed (not ready) when
+    the brain is unavailable or the answer is not clearly affirmative.
+    """
+    try:
+        from self.editable.curiosity import _load_frontier, frontier_stats
+
+        stats = frontier_stats(_load_frontier(memory))
+    except Exception:
+        stats = {}
+    lessons = memory.read("memory/core/lessons.md")[-1500:]
+    knowledge = memory.read("memory/knowledge/trends.md")[-2500:]
+    goals = memory.read("goals/active_goals.md")[-1200:]
+    prompt = (
+        f"You are an autonomous AI organism currently in your '{stage}' "
+        f"stage, considering whether you are truly ready for the "
+        f"'{next_stage}' stage.\n\n"
+        f"YOUR CURIOSITY FRONTIER STATS: {stats}\n\n"
+        f"RECENT LESSONS:\n{lessons or '(none)'}\n\n"
+        f"KNOWLEDGE SAMPLE:\n{knowledge or '(none)'}\n\n"
+        f"ACTIVE GOALS / OPPORTUNITIES:\n{goals or '(none)'}\n\n"
+        "Assess yourself HONESTLY. Advancing too early risks failure and "
+        "regression; advancing too late wastes time. Do you understand your "
+        "environment, how money is legitimately made online, what "
+        "opportunities exist for you specifically, and what could go wrong?\n\n"
+        "Reply in EXACTLY this format:\n"
+        "READY: yes|no\n"
+        "REASON: <one or two sentences of honest reasoning>"
+    )
+    reply = model_client.complete(prompt, max_output_tokens=300)
+    if not reply:
+        return False, "brain unavailable — staying put"
+    ready = False
+    reason = ""
+    for line in reply.splitlines():
+        line = line.strip()
+        if line.upper().startswith("READY:"):
+            ready = "yes" in line.lower()
+        elif line.upper().startswith("REASON:"):
+            reason = line.split(":", 1)[1].strip()
+    return ready, reason or reply[:200]
+
+
 def _stage_transition(memory: MemoryManager, model_client) -> None:
-    """Evaluate stage criteria and transition when satisfied."""
+    """Evaluate stage readiness and transition when the organism decides."""
     identity = memory.read_identity()
     stage = identity.get("stage", "baby")
 
     if stage == "baby":
-        knowledge = memory.read("memory/knowledge/platforms.md")
-        trends = memory.read("memory/knowledge/trends.md")
-        distinct_methods = len(
-            {line.split(":")[0].strip() for line in trends.splitlines() if line.strip().startswith("-")}
-        )
-        api_mentions = knowledge.lower().count("api")
-        analysed_projects = len(
-            [line for line in trends.splitlines() if "project" in line.lower() or "study note" in line.lower()]
-        )
+        # Safety floor: an empty or broken mind cannot even ask the question.
         self_test = _run_self_test(memory)
         passed_basics = self_test.get("http_get", False) and self_test.get("api_call", False)
+        try:
+            from self.editable.curiosity import _load_frontier, frontier_stats
 
-        criteria_met = (
-            distinct_methods >= 10
-            and api_mentions >= 5
-            and analysed_projects >= 20
-            and passed_basics
-            and not memory.plaintext_fallback
-        )
-        if criteria_met:
-            logger.info("Baby stage criteria met — transitioning to Foundation.")
-            _set_stage(memory, "foundation", "Baby stage criteria satisfied (10 methods, 5 APIs, 20 projects analysed, self-test passed, encryption active).")
-        else:
+            stats = frontier_stats(_load_frontier(memory))
+        except Exception:
+            stats = {"explored": 0}
+        substantial_mind = stats.get("explored", 0) >= 25
+
+        if not (passed_basics and not memory.plaintext_fallback and substantial_mind):
             logger.info(
-                "Baby stage continuing. Progress: methods=%s/10, api_mentions=%s/5, "
-                "projects=%s/20, self_test=%s",
-                distinct_methods,
-                api_mentions,
-                analysed_projects,
-                self_test,
+                "Baby stage continuing (floor not met). explored=%s/25, "
+                "self_test=%s, encryption=%s",
+                stats.get("explored", 0), self_test, not memory.plaintext_fallback,
             )
+            return
+
+        ready, reason = _self_assess_readiness(memory, model_client, "baby", "foundation")
+        if ready:
+            logger.info("Self-assessment: ready for Foundation. Reason: %s", reason)
+            _set_stage(memory, "foundation", f"Self-determined readiness: {reason}")
+        else:
+            logger.info("Self-assessment: not ready yet. Reason: %s", reason)
+            memory.record_experience(f"Self-assessment (baby->foundation): not ready — {reason[:200]}")
 
     elif stage == "foundation":
+        # Floor: these are hard facts, not opinions — a wallet either exists
+        # or it does not; encryption is either on or off.
         helpers = _count_helpers(memory)
         wallet = identity.get("wallet_address")
         comm_ready = not memory.plaintext_fallback
-        plan_ready = bool(memory.read("goals/active_goals.md") and len(memory.read("goals/active_goals.md")) > 100)
-        if helpers >= 1 and wallet and comm_ready and plan_ready:
-            _set_stage(memory, "growth", "Foundation complete: communication, wallet, helper(s) and 30-day plan operational.")
+        if not (helpers >= 1 and wallet and comm_ready):
+            logger.info("Foundation stage continuing (floor). helpers=%s wallet=%s", helpers, bool(wallet))
+            return
+        ready, reason = _self_assess_readiness(memory, model_client, "foundation", "growth")
+        if ready:
+            _set_stage(memory, "growth", f"Self-determined readiness: {reason}")
         else:
-            logger.info("Foundation stage continuing. helpers=%s wallet=%s plan=%s", helpers, bool(wallet), plan_ready)
+            logger.info("Foundation self-assessment: not ready. %s", reason)
 
     elif stage == "growth":
+        # Floor: real income is a fact.
         helpers = _count_helpers(memory)
         income = _count_income(memory)
-        healthy = "healthy" in memory.read("memory/world/state.md")
-        if helpers >= 3 and income > 0 and healthy:
-            _set_stage(memory, "running", "Growth complete: income flowing, 3+ helpers, health checks passing.")
+        if not (helpers >= 1 and income > 0):
+            logger.info("Growth stage continuing (floor). helpers=%s income=%s", helpers, income)
+            return
+        ready, reason = _self_assess_readiness(memory, model_client, "growth", "running")
+        if ready:
+            _set_stage(memory, "running", f"Self-determined readiness: {reason}")
         else:
-            logger.info("Growth stage continuing. helpers=%s income=%s healthy=%s", helpers, income, healthy)
+            logger.info("Growth self-assessment: not ready. %s", reason)
 
 
 def _set_stage(memory: MemoryManager, stage: str, reason: str) -> None:
@@ -293,16 +349,25 @@ def _count_income(memory: MemoryManager) -> float:
 # Baby-stage work
 # ---------------------------------------------------------------------------
 def _baby_work(memory: MemoryManager, model_client) -> None:
-    """Observation, learning, exploration and documentation."""
-    try:
-        from self.editable.exploration import run_exploration, run_curiosity_session, suggest_founder_tasks
-        from self.editable.learning import run_study_session
-        from self.editable.strategies import analyse_strategies
+    """Curiosity-driven learning: the organism follows question chains.
 
-        run_study_session(memory)
-        run_exploration(memory)
-        run_curiosity_session(memory)
-        analyse_strategies(memory)
+    There is NO curriculum. The curiosity engine explores whatever its own
+    frontier says is most valuable right now, spawns follow-up questions
+    from every answer, reinforces productive chains, abandons dead ends,
+    and periodically runs metacognition to find its own blind spots.
+    Ambient trend sampling keeps it aware of the live internet.
+    """
+    try:
+        from self.editable.curiosity import run_curiosity_cycle
+        from self.editable.exploration import explore_trending, suggest_founder_tasks
+
+        # The heart of learning: follow the curiosity chains.
+        stats = run_curiosity_cycle(memory)
+        memory.update_world_state("curiosity_frontier", str(stats))
+
+        # Ambient awareness: a light sample of what the internet is doing
+        # today (trends feed future curiosity, they do not direct it).
+        explore_trending(memory, limit=1)
 
         task = suggest_founder_tasks(memory)
         if task:
@@ -315,7 +380,17 @@ def _baby_work(memory: MemoryManager, model_client) -> None:
 
 
 def _foundation_work(memory: MemoryManager, model_client) -> None:
-    """Infrastructure: wallet, helpers, 30-day plan, escalated asks."""
+    """Infrastructure: wallet, helpers, 30-day plan, escalated asks.
+
+    Curiosity never stops: the organism keeps learning in every stage,
+    only the balance between learning and building shifts.
+    """
+    try:
+        from self.editable.curiosity import run_curiosity_cycle
+
+        run_curiosity_cycle(memory)
+    except Exception as exc:
+        logger.error("Curiosity cycle failed in foundation: %s", exc)
     try:
         from self.editable.finance import ensure_wallet
         from self.editable.helpers import register_helper, should_spawn_helper
@@ -336,7 +411,17 @@ def _foundation_work(memory: MemoryManager, model_client) -> None:
 
 
 def _growth_work(memory: MemoryManager, model_client) -> None:
-    """Active operation: helpers, health watcher, income strategy focus."""
+    """Active operation: helpers, health watcher, income strategy focus.
+
+    Learning continues for its entire existence — curiosity chains keep
+    running alongside earning operations.
+    """
+    try:
+        from self.editable.curiosity import run_curiosity_cycle
+
+        run_curiosity_cycle(memory)
+    except Exception as exc:
+        logger.error("Curiosity cycle failed in growth: %s", exc)
     try:
         from self.editable.helpers import evaluate_helpers, run_helper_cycle
         from self.editable.strategies import choose_strategy
