@@ -199,14 +199,88 @@ def run_helper_cycle(memory_manager: MemoryManager, name: str, model_client) -> 
         f"{mem[:1500]}\n\n"
         "Perform ONE small, concrete action that advances your purpose "
         "(observe, verify, or produce a short report). Do not touch files. "
-        "Reply with exactly three lines: "
-        "STATUS: ok|attention\nRESULT: <one sentence>\nNOTES: <one sentence>"
+        "If your workload has grown so rich that a dedicated offspring "
+        "helper would clearly capture more value, you may request one on "
+        "the OFFSPRING line (most runs: '-'). "
+        "Reply with exactly four lines: "
+        "STATUS: ok|attention\nRESULT: <one sentence>\nNOTES: <one sentence>\n"
+        "OFFSPRING: <short_snake_case_name>: <narrow purpose> or '-'"
     )
     try:
         result = model_client.complete(prompt, max_output_tokens=300)
     except Exception as exc:
-        result = f"STATUS: attention\nRESULT: model call failed\nNOTES: {exc}"
+        result = f"STATUS: attention\nRESULT: model call failed\nNOTES: {exc}\nOFFSPRING: -"
     runs = _extract_runs(mem) + 1
     entry = f"run #{runs} @ {config.utc_now_iso()}\n{result.strip()}\n"
     memory_manager.write_helper_memory(name, mem.rstrip() + "\n\n" + entry)
     LOGGER.info("Helper %s completed run #%s", name, runs)
+
+    # Reproduction: a helper may PROPOSE offspring when opportunity is rich;
+    # the mother brain reviews before any birth (founder's rule: helpers
+    # "reproduce to increase income if there is a lot of work").
+    try:
+        _consider_offspring(memory_manager, name, result, model_client)
+    except Exception as exc:
+        LOGGER.warning("Offspring consideration failed for %s: %s", name, exc)
+
+
+def _consider_offspring(memory_manager: MemoryManager, parent: str, run_output: str, model_client) -> Optional[str]:
+    """Review a helper's OFFSPRING request and, if approved, register it.
+
+    Helpers propose; the mother brain decides. The cap (MAX_HELPERS) and
+    duplicate-name guards always apply — free-tier discipline outranks
+    ambition. Returns the new helper's name when one is born, else None.
+    """
+    proposal = ""
+    for line in (run_output or "").splitlines():
+        if line.strip().upper().startswith("OFFSPRING:"):
+            proposal = line.split(":", 1)[1].strip()
+            break
+    if not proposal or proposal == "-":
+        return None
+    if len(list_helpers(memory_manager)) >= MAX_HELPERS:
+        memory_manager.record_decision(
+            f"Helper '{parent}' requested offspring ('{proposal[:120]}') but "
+            f"the helper cap ({MAX_HELPERS}) is reached. Declined."
+        )
+        return None
+
+    goals = memory_manager.read("goals/active_goals.md")[-1500:]
+    review = (
+        "You are the mother brain of an autonomous AI organism. Your helper "
+        f"'{parent}' requests permission to reproduce: it wants an offspring "
+        f"helper described as: {proposal[:300]}\n\n"
+        f"YOUR ACTIVE GOALS:\n{goals}\n\n"
+        "Approve ONLY if the offspring serves a genuinely rich, recurring "
+        "workload tied to your goals. Reply in EXACTLY this format:\n"
+        "APPROVE: yes|no\nNAME: <short_snake_case_name or '-'>\n"
+        "PURPOSE: <one sentence or '-'>"
+    )
+    try:
+        reply = model_client.complete(review, max_output_tokens=200) or ""
+    except Exception as exc:
+        LOGGER.warning("Offspring review model call failed: %s", exc)
+        return None
+
+    approve, name, purpose = False, "", ""
+    for line in reply.splitlines():
+        line = line.strip()
+        if line.upper().startswith("APPROVE:"):
+            approve = "yes" in line.lower()
+        elif line.upper().startswith("NAME:"):
+            name = line.split(":", 1)[1].strip().strip("-").strip()
+        elif line.upper().startswith("PURPOSE:"):
+            purpose = line.split(":", 1)[1].strip().strip("-").strip()
+    if not (approve and name and purpose):
+        return None
+
+    import re
+
+    name = re.sub(r"[^a-z0-9_]", "_", name.lower())[:40].strip("_")
+    if not name or name in list_helpers(memory_manager) or name in helper_registry(memory_manager):
+        return None
+    register_helper(memory_manager, name, f"{purpose[:260]} (offspring of {parent})")
+    memory_manager.record_event(
+        f"Helper reproduction: '{parent}' spawned offspring '{name}'."
+    )
+    return name

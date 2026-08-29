@@ -571,6 +571,68 @@ def main() -> int:
     ready, _ = _self_assess_readiness(mem, SilentModel(), "baby", "foundation")
     check("self-assessment fails closed without brain", ready is False)
 
+    print("== Founder charter (preprogrammed law) ==")
+    charter = loyalty.charter_text()
+    check("charter names the founder", "WISDOM SIFA" in charter)
+    check("charter: zero capital rule", "ZERO CAPITAL" in charter)
+    check("charter: free tiers end", "FREE TIERS END" in charter)
+    check("charter: private channel mandate", "PRIVATE CHANNEL" in charter)
+    check("charter: professional standard", "PROFESSIONAL STANDARD" in charter)
+    check("charter: human hands protocol", "HUMAN HANDS" in charter)
+    check("charter: crypto first", "CRYPTO FIRST" in charter)
+    # Charter must be written to memory at birth and ride in every context.
+    check("charter stored in memory at birth", "PRIVATE CHANNEL" in mem.read("memory/core/charter.md"))
+    check(
+        "private channel is a standing goal",
+        "private" in mem.read("goals/active_goals.md").lower()
+        and "channel" in mem.read("goals/active_goals.md").lower(),
+    )
+    from self.editable.context import build_context
+
+    ctx = build_context(mem, {"name": "Lumina", "stage": "baby"}, {"date": "today", "run_number": 1})
+    check("charter present in every context", "ZERO CAPITAL" in ctx and "PRIVATE CHANNEL" in ctx)
+
+    print("== Helper reproduction (offspring) ==")
+    from self.editable.helpers import (
+        _consider_offspring,
+        list_helpers as _list_helpers,
+        register_helper as _register_helper,
+    )
+
+    _register_helper(mem, "trend_watcher", "watch the internet for trends")
+
+    class ApprovingMother:
+        @staticmethod
+        def complete(prompt, max_output_tokens=1500):
+            return "APPROVE: yes\nNAME: niche_miner\nPURPOSE: mine the discovered rich niche daily"
+
+    class RefusingMother:
+        @staticmethod
+        def complete(prompt, max_output_tokens=1500):
+            return "APPROVE: no\nNAME: -\nPURPOSE: -"
+
+    born = _consider_offspring(
+        mem, "trend_watcher",
+        "STATUS: ok\nRESULT: found a rich niche\nNOTES: lots of work\n"
+        "OFFSPRING: niche_miner: mine the discovered rich niche daily",
+        ApprovingMother(),
+    )
+    check("offspring born when mother approves", born == "niche_miner" and "niche_miner" in _list_helpers(mem))
+    helper_mem = mem.read_helper_memory("niche_miner")
+    check("offspring records its parent", "offspring of trend_watcher" in helper_mem)
+    born2 = _consider_offspring(
+        mem, "trend_watcher",
+        "STATUS: ok\nRESULT: fine\nNOTES: fine\nOFFSPRING: spam_bot: do everything",
+        RefusingMother(),
+    )
+    check("offspring refused when mother declines", born2 is None)
+    born3 = _consider_offspring(
+        mem, "trend_watcher",
+        "STATUS: ok\nRESULT: fine\nNOTES: fine\nOFFSPRING: -",
+        ApprovingMother(),
+    )
+    check("no offspring without a proposal", born3 is None)
+
     # Cleanup
     os.environ.pop(config.ENV_ORGANISM_PRIVATE_KEY, None)
     os.environ.pop(config.ENV_KILL_PHRASE, None)

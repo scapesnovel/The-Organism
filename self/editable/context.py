@@ -50,6 +50,11 @@ def build_context(memory_manager, identity: dict, state: dict) -> str:
         f"- Loyalty: {loyalty.loyalty_statement()}\n"
     )
 
+    # The founder's charter is immutable law: it rides in EVERY context so
+    # no reflection ever forgets the zero-capital rule, the private-channel
+    # mandate, the professional standard, or the crypto-first economics.
+    parts.append(_section("Founder's charter (immutable law)", loyalty.charter_text()))
+
     parts.append(_section("Identity", _clip(memory_manager.read("memory/core/identity.md"), 1200)))
     parts.append(_section("Recent experiences", _clip(memory_manager.read("memory/core/experiences.md"), MAX_CORE_CHARS)))
     parts.append(_section("Lessons learned", _clip(memory_manager.read("memory/core/lessons.md"), MAX_CORE_CHARS)))

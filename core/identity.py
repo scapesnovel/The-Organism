@@ -183,6 +183,22 @@ def perform_birth(model_client, memory_manager, encryption: Optional[EncryptionM
     )
     memory_manager.write("memory/core/identity.md", record)
 
+    # --- The founder's charter (preprogrammed law, carried from birth) -----
+    # The charter lives in core/loyalty.py (protected). At birth it is also
+    # written into encrypted memory so every future reflection, prompt and
+    # reset-survivor can read it alongside lessons and goals.
+    memory_manager.write("memory/core/charter.md", loyalty.charter_text() + "\n")
+    # The PRIVATE CHANNEL mandate is a standing goal from day one — the
+    # founder explicitly ordered a dedicated communication surface beyond
+    # GitHub issues. The HOW must be learned; the WHAT is law.
+    memory_manager.append(
+        "goals/active_goals.md",
+        "STANDING GOAL (founder charter): design and build a private, "
+        "encrypted communication channel for the founder and me — beyond "
+        "GitHub issues (e.g. a private chat interface). Research approaches, "
+        "propose a plan, and migrate our conversations once it works.",
+    )
+
     # --- Mark birth complete ----------------------------------------------
     BIRTH_MARKER.parent.mkdir(parents=True, exist_ok=True)
     BIRTH_MARKER.write_text(
