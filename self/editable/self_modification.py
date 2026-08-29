@@ -79,7 +79,13 @@ class SelfModificationManager:
 
         for issue in issues:
             title = issue.get("title") or ""
-            if PROPOSAL_LABEL not in (issue.get("labels") or []) and "[self-modification]" not in title:
+            # GitHub returns label OBJECTS ({"name": ...}), not bare strings,
+            # so extract the names before the membership test.
+            label_names = {
+                (lbl.get("name") if isinstance(lbl, dict) else str(lbl))
+                for lbl in (issue.get("labels") or [])
+            }
+            if PROPOSAL_LABEL not in label_names and "[self-modification]" not in title:
                 continue
             number = issue.get("number")
             body = issue.get("body") or ""

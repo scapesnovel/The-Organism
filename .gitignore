@@ -6,12 +6,19 @@ __pycache__/
 venv/
 
 # Local runtime artifacts (never commit these)
+# NOTE: state/ is intentionally NOT ignored — the birth marker, kill-switch
+# marker and run counters live there and MUST survive the fresh checkout of
+# every Actions run.
 runtime/
 logs/*.log
 logs/*.log.*
-secrets/private_key_backup.asc
+logs/runtime_state.json
 secrets/founder_bootstrap.asc
 .gnupg/
+
+# Editable-file backups are local safety copies; committing 6 timestamped
+# sets per day would bloat the repository forever.
+self/backup/
 
 # Encrypted daily reports are committed so the founder can read them with his key
 # (they contain no plaintext secrets by construction).

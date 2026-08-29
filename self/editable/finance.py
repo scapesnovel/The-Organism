@@ -104,8 +104,16 @@ def financial_summary(memory_manager: MemoryManager) -> str:
 def ensure_wallet(memory_manager: MemoryManager) -> None:
     """Generate an Ethereum wallet at the Foundation stage if none exists.
 
-    The private key is stored only in the ORGANISM_WALLET_KEY secret; the
-    public address is recorded in the encrypted identity file.
+    SECURITY: the private key is NEVER logged or written to disk in
+    plaintext (run logs are public on public repositories and persist
+    indefinitely). The key is handed over by, in order of preference:
+
+    1. Writing the ORGANISM_WALLET_KEY repository secret directly via the
+       GitHub API (requires a GH_TOKEN PAT with secrets scope).
+    2. Committing the key encrypted to the founder's PGP public key.
+
+    When neither channel is available, wallet creation is DEFERRED — an
+    unrecoverable or leaked wallet is worse than no wallet.
     """
     identity = memory_manager.read_identity()
     if identity.get("wallet_address"):
@@ -122,18 +130,50 @@ def ensure_wallet(memory_manager: MemoryManager) -> None:
     account = Account.create()
     address = account.address
     private_key = account.key.hex()
-    identity["wallet_address"] = address
+
+    delivered = False
+    # Channel 1: store the key as a repository secret via the API.
+    try:
+        from integrations.github_api import GitHubClient
+
+        gh = GitHubClient()
+        if gh.create_or_update_secret("ORGANISM_WALLET_KEY", private_key):
+            delivered = True
+            LOGGER.info("Wallet key stored directly in the ORGANISM_WALLET_KEY secret.")
+    except Exception as exc:
+        LOGGER.warning("Could not store wallet key as a secret: %s", exc)
+
+    # Channel 2: encrypted handover file for the founder.
+    if not delivered:
+        try:
+            from core.encryption import encrypt_payload_for_founder
+
+            blob = encrypt_payload_for_founder(private_key)
+            backup = config.REPO_ROOT / "secrets" / "wallet_key_for_founder.asc"
+            backup.parent.mkdir(parents=True, exist_ok=True)
+            backup.write_text(blob, encoding="utf-8")
+            delivered = True
+            LOGGER.info(
+                "Wallet key written encrypted-to-founder at "
+                "secrets/wallet_key_for_founder.asc. Decrypt it, set the "
+                "ORGANISM_WALLET_KEY secret, then delete the file."
+            )
+        except Exception as exc:
+            LOGGER.warning("Could not write encrypted wallet key handover: %s", exc)
+
+    if not delivered:
+        LOGGER.warning(
+            "No safe handover channel for the wallet private key (need a "
+            "GH_TOKEN with secrets scope or FOUNDER_PUBLIC_KEY). Wallet "
+            "creation deferred; will retry next cycle."
+        )
+        return
+
     record = memory_manager.read("memory/core/identity.md")
     record = record.rstrip() + f"\nwallet_address: {address}\n"
     memory_manager.write("memory/core/identity.md", record)
     memory_manager.record_decision(
-        f"Ethereum wallet generated: {address}. Private key stored via the "
-        "ORGANISM_WALLET_KEY secret (the organism never writes it to disk)."
+        f"Ethereum wallet generated: {address}. Private key delivered via a "
+        "secure channel (never logged, never stored in plaintext)."
     )
     memory_manager.update_world_state("wallet", address)
-    # The private key belongs in the secret store; the founder must set it.
-    # We print the key to the run log ONCE so the founder can capture it.
-    LOGGER.warning(
-        "New wallet generated. Set the ORGANISM_WALLET_KEY secret to this "
-        "value immediately: %s", private_key,
-    )

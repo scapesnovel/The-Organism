@@ -329,9 +329,20 @@ def _count_helper_names(memory: MemoryManager) -> list:
 # Daily report & housekeeping
 # ---------------------------------------------------------------------------
 def _daily_report(memory: MemoryManager, communication_manager) -> None:
-    """Compose and deliver the encrypted daily report."""
+    """Compose and deliver the encrypted daily report (at most once per day).
+
+    Without this guard the organism opened a brand-new report issue on
+    every wake cycle — six issues a day — which spams the founder and
+    burns API quota.
+    """
     try:
         from self.editable.finance import financial_summary
+
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        state = memory.load_runtime_state()
+        if state.get("last_daily_report") == today:
+            logger.info("Daily report already delivered today; skipping.")
+            return
 
         identity = memory.read_identity()
         name = identity.get("name", "Organism")
@@ -356,6 +367,8 @@ def _daily_report(memory: MemoryManager, communication_manager) -> None:
         date_stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
         memory.write(f"reports/daily/{date_stamp}.md", report)
         communication_manager.send_daily_report(report)
+        state["last_daily_report"] = today
+        memory.save_runtime_state(state)
         logger.info("Daily report written and delivered.")
     except Exception as exc:
         logger.error("Daily report failed: %s", exc)
@@ -414,8 +427,19 @@ def _commit_and_push(github, message: str) -> None:
             check=False,
         )
         branch = config.git_branch()
+        # Integrate any remote commits made since checkout (another run or
+        # the founder) before pushing; a plain push would be rejected and
+        # the failure swallowed silently.
         subprocess.run(
-            ["git", "push", "origin", branch],
+            ["git", "pull", "--rebase", "origin", branch],
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            timeout=300,
+            check=False,
+        )
+        subprocess.run(
+            ["git", "push", "origin", f"HEAD:{branch}"],
             cwd=str(REPO_ROOT),
             capture_output=True,
             text=True,
@@ -453,7 +477,10 @@ def wake() -> int:
     try:
         if kill_switch.check_kill_switch(github, logger):
             logger.critical("Kill switch tripped. Halting.")
-            return 1
+            # Intended shutdown, not a failure: exit 0 so the workflow does
+            # not open a "wake cycle failed" issue every 4 hours forever.
+            # The committed kill marker keeps every future run halted.
+            return 0
     except Exception as exc:
         logger.critical("Kill switch check failed: %s — halting as fail-safe.", exc)
         return 1
@@ -467,10 +494,20 @@ def wake() -> int:
     memory.save_runtime_state(state)
 
     # --- Model client -------------------------------------------------------
+    # Consumers (identity, communication, helpers) call ``.complete(...)``,
+    # so this must be an object exposing that method — not a bare function.
     from integrations import gemini_api
 
-    def model_client(prompt: str, max_output_tokens: int = 1500) -> str:
-        return gemini_api.complete(prompt, max_output_tokens=max_output_tokens)
+    class ModelClient:
+        @staticmethod
+        def complete(prompt: str, max_output_tokens: int = 1500) -> str:
+            return gemini_api.complete(prompt, max_output_tokens=max_output_tokens)
+
+        # Keep the object callable for any legacy call sites.
+        def __call__(self, prompt: str, max_output_tokens: int = 1500) -> str:
+            return self.complete(prompt, max_output_tokens=max_output_tokens)
+
+    model_client = ModelClient()
 
     # --- Birth or normal operation ------------------------------------------
     if not identity_core.is_born(memory):

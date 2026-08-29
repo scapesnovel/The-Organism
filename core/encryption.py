@@ -56,9 +56,17 @@ class EncryptionManager:
     def __init__(self, workdir: Optional[Path] = None) -> None:
         self.workdir = workdir or (config.RUNTIME_DIR / "gpg_work")
         self.workdir.mkdir(parents=True, exist_ok=True)
+        # GPG refuses to operate on a world-readable home directory.
+        try:
+            os.chmod(self.workdir, 0o700)
+        except OSError:
+            pass
         self._gpg = None
         self._organism_fingerprint: Optional[str] = None
         self._founder_fingerprint: Optional[str] = None
+        # pgpy engine key objects (always initialised so attribute access is safe)
+        self._organism_key = None
+        self._founder_key = None
 
     # ------------------------------------------------------------------
     # Engine selection
@@ -100,20 +108,27 @@ class EncryptionManager:
         self._ensure_engine()
         if self.engine == "gnupg":
             gpg = self._get_gpg()
+            # Modern GnuPG (>= 2.1) requires the explicit %no-protection
+            # directive for a passphrase-less key; passing passphrase=""
+            # alone makes gen_key fail against the gpg-agent.
             input_data = gpg.gen_key_input(
                 key_type="RSA",
                 key_length=4096,
                 name_real="The Organism (autonomous entity)",
                 name_email="organism@localhost",
-                passphrase="",
                 expire_date="0",
+                no_protection=True,
             )
             key = gpg.gen_key(input_data)
             if not key or not key.fingerprint:
                 raise EncryptionError("GPG key generation failed.")
             self._organism_fingerprint = key.fingerprint
             public_armor = gpg.export_keys(key.fingerprint)
-            private_armor = gpg.export_keys(key.fingerprint, secret=True, passphrase="")
+            private_armor = gpg.export_keys(
+                key.fingerprint,
+                secret=True,
+                expect_passphrase=False,
+            )
             if not private_armor:
                 raise EncryptionError("GPG private key export failed.")
             config.IDENTITY_PUB_FILE.write_text(public_armor, encoding="utf-8")
@@ -135,6 +150,8 @@ class EncryptionManager:
             },
         )
         private_armor = str(key)
+        # Keep the generated key loaded so this run can immediately encrypt.
+        self._organism_key = key
         config.IDENTITY_PUB_FILE.write_text(str(key.pubkey), encoding="utf-8")
         return private_armor
 
@@ -182,9 +199,29 @@ class EncryptionManager:
     # ------------------------------------------------------------------
     def is_configured(self) -> bool:
         """True when at least the organism's own key is available."""
-        return self.engine != "none" and (
-            self._organism_fingerprint is not None or HAS_GPG or HAS_PGPY
-        )
+        return self.has_organism_key()
+
+    def has_organism_key(self) -> bool:
+        """True when the organism's own key material is actually loaded.
+
+        This is the authoritative check used by the memory layer to decide
+        whether encryption-at-rest is possible. It must reflect *loaded key
+        material*, not merely engine availability, otherwise the first run
+        (before any key exists) crashes on every encrypted write.
+        """
+        if self.engine == "gnupg":
+            return self._organism_fingerprint is not None
+        if self.engine == "pgpy":
+            return self._organism_key is not None
+        return False
+
+    def has_founder_key(self) -> bool:
+        """True when the founder's public key is loaded."""
+        if self.engine == "gnupg":
+            return self._founder_fingerprint is not None
+        if self.engine == "pgpy":
+            return self._founder_key is not None
+        return False
 
     def encrypt_to_self(self, plaintext: str) -> str:
         """Encrypt ``plaintext`` so that only the organism can read it."""
@@ -307,22 +344,27 @@ class EncryptionManager:
 
 
 def self_encrypt_private_key(private_armor: str, founder_public_armor: Optional[str]) -> str:
-    """Encrypt the private key for the founder (or self) and return the blob.
+    """Encrypt the organism's private key TO THE FOUNDER and return the blob.
 
     Used at birth: the private key must never be stored in plaintext, so it
-    is encrypted to the founder's public key. If the founder's key is not
-    available yet, it is encrypted to the organism's own public key and the
-    founder must later re-encrypt it once he has exchanged keys.
+    is encrypted to the founder's public key.
+
+    NOTE: encrypting the private key to the organism's *own* public key was
+    removed because it is circular — you would need the private key to
+    decrypt the private key, making such a backup unrecoverable. When the
+    founder's key is unavailable this function raises so callers can defer
+    the backup instead of writing a useless file.
     """
+    if not founder_public_armor:
+        raise EncryptionError(
+            "Cannot back up the private key: the founder's public key is not "
+            "configured. A self-encrypted backup would be circular and "
+            "unrecoverable."
+        )
     manager = EncryptionManager()
     manager.import_organism_private_key(private_armor)
-    if founder_public_armor:
-        try:
-            manager.import_founder_public_key(founder_public_armor)
-            return manager.wrap_payload(manager.encrypt_to_founder(private_armor))
-        except Exception:
-            pass  # fall through to self-encryption
-    return manager.wrap_payload(manager.encrypt_to_self(private_armor))
+    manager.import_founder_public_key(founder_public_armor)
+    return manager.wrap_payload(manager.encrypt_to_founder(private_armor))
 
 
 def encrypt_payload_for_founder(plaintext: str) -> str:

@@ -138,8 +138,10 @@ class GitHubClient:
             return None
 
     def list_commits(self, path: Optional[str] = None, per_page: int = 30) -> List[Dict[str, Any]]:
+        # (was: a stray '&' when no path was given plus a blind [:200] slice
+        # that could truncate the URL mid-parameter)
         suffix = f"?path={quote(path)}" if path else ""
-        return self._paginate(f"/repos/{self.repo}/commits{suffix}&per_page={per_page}"[:200])
+        return self._paginate(f"/repos/{self.repo}/commits{suffix}", per_page=per_page)
 
     def latest_commit_sha(self, branch: str = "main") -> str:
         data = self._request("GET", f"/repos/{self.repo}/commits/{quote(branch)}")
@@ -253,6 +255,21 @@ class GitHubClient:
     def whoami(self) -> str:
         data = self._request("GET", "/user")
         return data.get("login", "unknown")
+
+    def can_reach_repo(self) -> bool:
+        """Health probe that works with BOTH token types.
+
+        The built-in Actions GITHUB_TOKEN cannot call /user (403), so the
+        health check must probe something a repository-scoped installation
+        token is allowed to read: the repository itself.
+        """
+        if not self.repo:
+            return False
+        try:
+            data = self._request("GET", f"/repos/{self.repo}")
+            return bool(data.get("full_name"))
+        except GitHubError:
+            return False
 
     def get_user_public_key_from_github(self, username: str) -> Optional[str]:
         """Try to fetch a user's PGP public key from their GitHub profile.
