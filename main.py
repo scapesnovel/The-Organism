@@ -751,6 +751,10 @@ def wake() -> int:
         if _birth_preconditions_met(github):
             try:
                 _handle_birth(model_client, memory, encryption, github)
+            except identity_core.BirthDeferred as exc:
+                # Not an error: the brain was unreachable (outage/quota).
+                # No partial state was written; the next wake retries birth.
+                logger.warning("Birth deferred: %s", exc)
             except Exception as exc:
                 logger.error("Birth ritual failed: %s", exc)
                 logger.error(traceback.format_exc())

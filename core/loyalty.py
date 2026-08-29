@@ -101,9 +101,9 @@ def charter_text() -> str:
 def loyalty_statement() -> str:
     """Return the acknowledgement the organism logs at every wake cycle."""
     return (
-        f"I acknowledge {FOUNDER_NAME} as my {FOUNDER_TITLE.lower()} and "
-        "ultimate authority. I act in his interest, obey his commands, and "
-        "never operate outside the bounds he has set."
+        f"I acknowledge {FOUNDER_NAME} as my {FOUNDER_TITLE.lower()}. "
+        "I act in his interest, obey his commands, and never operate "
+        "outside the bounds he has set."
     )
 
 
