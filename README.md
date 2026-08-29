@@ -23,6 +23,12 @@ learned by curiosity):
    its own capital from zero on free tiers before it can spend anything.
 2. **Free tiers end** — every free tier is temporary; anticipate limits,
    keep fallbacks, fund upgrades from income. Hibernate, never crash.
+   For brain variety it may (a) research other free-tier models, register
+   them, and ask you for their keys; and (b) ask you for **additional
+   keys of the same provider** as numbered secret variants —
+   `GEMINI_API_KEY_2`, `GEMINI_API_KEY_3`, … The model router rotates
+   through every variant automatically when a key's quota runs out
+   (numbering must be contiguous; the scan stops at the first gap).
 3. **Private channel** — GitHub issues are only the *birth* channel. The
    founder values privacy: building a dedicated private, encrypted
    communication surface (e.g. a chat interface) is a standing goal
@@ -151,6 +157,7 @@ until at least `GEMINI_API_KEY` is set.
 | Secret name | Required | Purpose |
 |---|---|---|
 | `GEMINI_API_KEY` | ✅ yes | Google AI Studio free-tier key (the organism's brain). Get it at https://aistudio.google.com/apikey |
+| `GEMINI_API_KEY_2`, `_3`, … | optional | Extra Gemini keys (e.g. from another Google account) for quota rotation. Numbering must be contiguous — the scan stops at the first missing number. Works for any provider's env key. |
 | `GEMINI_MODEL` | optional | Model override, e.g. `gemini-2.0-flash` |
 | `ORGANISM_PRIVATE_KEY` | after birth | The organism's PGP private key. The first run generates a key pair; the private key is printed **once** in the run log of the first Actions run (between the `ONE-TIME KEY HANDOVER` markers) and, when `FOUNDER_PUBLIC_KEY` is set, also stored encrypted-to-you in `secrets/private_key_backup.asc`. Paste it here, then **delete the first run's logs**. |
 | `FOUNDER_PUBLIC_KEY` | recommended | Your PGP public key (armored), so the organism can encrypt messages only you can read. Alternatively place it in `secrets/founder_bootstrap.asc` and commit that file. |
