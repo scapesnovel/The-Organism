@@ -162,6 +162,33 @@ def resolve_key(env_key: str) -> Optional[str]:
     return value or None
 
 
+# Maximum numbered key variants scanned per provider (BASE, BASE_2 .. BASE_N).
+MAX_KEY_VARIANTS = 10
+
+
+def resolve_keys(env_key: str) -> List[str]:
+    """Resolve EVERY key variant for a provider: BASE, BASE_2, BASE_3, ...
+
+    The founder may add extra keys for the SAME provider (e.g. a second
+    free-tier Gemini key under ``GEMINI_API_KEY_2``) so the organism has
+    variety when one key's quota runs out. Variants follow the naming rule
+    ``<ENV_KEY>_<n>`` for n = 2..MAX_KEY_VARIANTS. Scanning stops at the
+    first missing number so the founder controls the pool size simply by
+    which secrets exist. Returned in order; duplicates removed.
+    """
+    keys: List[str] = []
+    base = resolve_key(env_key)
+    if base:
+        keys.append(base)
+    for n in range(2, MAX_KEY_VARIANTS + 1):
+        variant = resolve_key(f"{env_key}_{n}")
+        if not variant:
+            break  # numbering is contiguous by convention; stop at first gap
+        if variant not in keys:
+            keys.append(variant)
+    return keys
+
+
 def available_providers() -> List[Dict]:
     """Providers that are enabled AND have a resolvable key right now."""
     return [
@@ -175,55 +202,111 @@ def available_providers() -> List[Dict]:
 # Completion backends
 # ---------------------------------------------------------------------------
 def _complete_gemini(provider: Dict, prompt: str, max_output_tokens: int) -> str:
+    """Gemini backend with key rotation: try every configured key variant.
+
+    Quota exhaustion on GEMINI_API_KEY falls through to GEMINI_API_KEY_2,
+    _3, ... before the router moves on to a different provider entirely.
+    """
     from integrations import gemini_api
 
-    return gemini_api.complete(prompt, max_output_tokens=max_output_tokens)
+    keys = resolve_keys(provider.get("env_key", config.ENV_GEMINI_API_KEY))
+    if not keys:
+        raise RuntimeError("No Gemini key resolvable.")
+    last_exc: Optional[Exception] = None
+    for index, key in enumerate(keys, 1):
+        try:
+            result = gemini_api.complete(
+                prompt, max_output_tokens=max_output_tokens, api_key=key
+            )
+            if result:
+                if index > 1:
+                    LOGGER.info("Answered via Gemini key variant #%s.", index)
+                return result
+        except Exception as exc:  # quota, auth, transport — try the next key
+            last_exc = exc
+            LOGGER.warning(
+                "Gemini key variant #%s failed (%s); trying next variant.",
+                index,
+                type(exc).__name__,
+            )
+    if last_exc is not None:
+        raise last_exc
+    return ""
 
 
 def _complete_openai(provider: Dict, prompt: str, max_output_tokens: int) -> str:
-    key = resolve_key(provider["env_key"])
-    base_url = (provider.get("base_url") or "https://api.openai.com/v1").rstrip("/")
-    model = provider.get("model") or "gpt-4o-mini"
-    response = requests.post(
-        f"{base_url}/chat/completions",
-        headers={"Authorization": f"Bearer {key}"},
-        json={
-            "model": model,
-            "messages": [{"role": "user", "content": prompt}],
-            "max_tokens": max_output_tokens,
-            "temperature": 0.7,
-        },
-        timeout=REQUEST_TIMEOUT,
-    )
-    response.raise_for_status()
-    data = response.json()
-    choices = data.get("choices") or []
-    if not choices:
-        return ""
-    return (choices[0].get("message", {}).get("content") or "").strip()
+    last_exc: Optional[Exception] = None
+    for index, key in enumerate(resolve_keys(provider["env_key"]), 1):
+        try:
+            base_url = (provider.get("base_url") or "https://api.openai.com/v1").rstrip("/")
+            model = provider.get("model") or "gpt-4o-mini"
+            response = requests.post(
+                f"{base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {key}"},
+                json={
+                    "model": model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "max_tokens": max_output_tokens,
+                    "temperature": 0.7,
+                },
+                timeout=REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+            data = response.json()
+            choices = data.get("choices") or []
+            if choices:
+                text = (choices[0].get("message", {}).get("content") or "").strip()
+                if text:
+                    if index > 1:
+                        LOGGER.info("Answered via '%s' key variant #%s.", provider.get("name"), index)
+                    return text
+        except Exception as exc:
+            last_exc = exc
+            LOGGER.warning(
+                "Provider '%s' key variant #%s failed (%s); trying next variant.",
+                provider.get("name"), index, type(exc).__name__,
+            )
+    if last_exc is not None:
+        raise last_exc
+    return ""
 
 
 def _complete_anthropic(provider: Dict, prompt: str, max_output_tokens: int) -> str:
-    key = resolve_key(provider["env_key"])
-    base_url = (provider.get("base_url") or "https://api.anthropic.com").rstrip("/")
-    model = provider.get("model") or "claude-3-5-haiku-latest"
-    response = requests.post(
-        f"{base_url}/v1/messages",
-        headers={
-            "x-api-key": key,
-            "anthropic-version": "2023-06-01",
-        },
-        json={
-            "model": model,
-            "max_tokens": max_output_tokens,
-            "messages": [{"role": "user", "content": prompt}],
-        },
-        timeout=REQUEST_TIMEOUT,
-    )
-    response.raise_for_status()
-    data = response.json()
-    blocks = data.get("content") or []
-    return "".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
+    last_exc: Optional[Exception] = None
+    for index, key in enumerate(resolve_keys(provider["env_key"]), 1):
+        try:
+            base_url = (provider.get("base_url") or "https://api.anthropic.com").rstrip("/")
+            model = provider.get("model") or "claude-3-5-haiku-latest"
+            response = requests.post(
+                f"{base_url}/v1/messages",
+                headers={
+                    "x-api-key": key,
+                    "anthropic-version": "2023-06-01",
+                },
+                json={
+                    "model": model,
+                    "max_tokens": max_output_tokens,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+                timeout=REQUEST_TIMEOUT,
+            )
+            response.raise_for_status()
+            data = response.json()
+            blocks = data.get("content") or []
+            text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text").strip()
+            if text:
+                if index > 1:
+                    LOGGER.info("Answered via '%s' key variant #%s.", provider.get("name"), index)
+                return text
+        except Exception as exc:
+            last_exc = exc
+            LOGGER.warning(
+                "Provider '%s' key variant #%s failed (%s); trying next variant.",
+                provider.get("name"), index, type(exc).__name__,
+            )
+    if last_exc is not None:
+        raise last_exc
+    return ""
 
 
 _BACKENDS = {
@@ -287,4 +370,16 @@ def brain_status() -> Dict:
         for p in providers
         if p.get("enabled", True) and not resolve_key(p.get("env_key", ""))
     ]
-    return {"usable": usable, "waiting_for_key": waiting, "total_registered": len(providers)}
+    # Key-variant depth per usable provider (COUNTS only, never values):
+    # lets health checks and daily reports show e.g. gemini: 3 keys.
+    key_counts = {
+        p["name"]: len(resolve_keys(p.get("env_key", "")))
+        for p in providers
+        if p.get("enabled", True) and resolve_key(p.get("env_key", ""))
+    }
+    return {
+        "usable": usable,
+        "waiting_for_key": waiting,
+        "total_registered": len(providers),
+        "key_counts": key_counts,
+    }

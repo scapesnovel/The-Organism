@@ -49,9 +49,14 @@ def _model_name() -> str:
     return os.environ.get(config.ENV_GEMINI_MODEL, DEFAULT_MODEL).strip() or DEFAULT_MODEL
 
 
-def complete(prompt: str, max_output_tokens: int = 1500) -> str:
-    """Run a single completion with retries and quota-aware backoff."""
-    key = _api_key()
+def complete(prompt: str, max_output_tokens: int = 1500, api_key: str = "") -> str:
+    """Run a single completion with retries and quota-aware backoff.
+
+    ``api_key`` lets the model router rotate through key variants
+    (GEMINI_API_KEY, GEMINI_API_KEY_2, ...); when empty, the primary
+    environment key is used as before.
+    """
+    key = api_key.strip() or _api_key()
     model = _model_name()
     url = BASE_URL.format(model=model)
 

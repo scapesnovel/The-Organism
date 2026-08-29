@@ -474,9 +474,61 @@ def main() -> int:
     state = mem.load_runtime_state()
     check("runtime state round trip", state.get("run_number") == 1)
 
+    print("== Model router key variants (GEMINI_API_KEY_2, ...) ==")
+    from integrations import model_router as _router
+
+    for var in ("SMOKE_ROUTER_KEY", "SMOKE_ROUTER_KEY_2", "SMOKE_ROUTER_KEY_3", "SMOKE_ROUTER_KEY_4"):
+        os.environ.pop(var, None)
+    check("no keys -> empty variant list", _router.resolve_keys("SMOKE_ROUTER_KEY") == [])
+    os.environ["SMOKE_ROUTER_KEY"] = "key-one"
+    check("single key resolved", _router.resolve_keys("SMOKE_ROUTER_KEY") == ["key-one"])
+    os.environ["SMOKE_ROUTER_KEY_2"] = "key-two"
+    os.environ["SMOKE_ROUTER_KEY_3"] = "key-three"
+    check(
+        "numbered variants resolved in order",
+        _router.resolve_keys("SMOKE_ROUTER_KEY") == ["key-one", "key-two", "key-three"],
+    )
+    # A gap in numbering stops the scan (founder controls pool by naming).
+    os.environ.pop("SMOKE_ROUTER_KEY_3", None)
+    os.environ["SMOKE_ROUTER_KEY_4"] = "key-four"
+    check(
+        "variant scan stops at first gap",
+        _router.resolve_keys("SMOKE_ROUTER_KEY") == ["key-one", "key-two"],
+    )
+    # Duplicate values collapse.
+    os.environ["SMOKE_ROUTER_KEY_3"] = "key-one"
+    check(
+        "duplicate key values collapse",
+        _router.resolve_keys("SMOKE_ROUTER_KEY") == ["key-one", "key-two", "key-four"],
+    )
+
+    # Rotation behaviour: first key exhausted -> second key answers.
+    from integrations import gemini_api as _gemini
+
+    _real_gemini_complete = _gemini.complete
+    calls = []
+
+    def _fake_gemini(prompt, max_output_tokens=1500, api_key=""):
+        calls.append(api_key)
+        if api_key == "key-one":
+            raise _gemini.GeminiQuotaExhausted("quota gone")
+        return "answer from second key"
+
+    _gemini.complete = _fake_gemini
+    try:
+        provider = {"name": "gemini", "kind": "gemini", "env_key": "SMOKE_ROUTER_KEY"}
+        result = _router._complete_gemini(provider, "hello", 100)
+        check("rotation: quota on key 1 falls through to key 2", result == "answer from second key")
+        check("rotation tried keys in order", calls[:2] == ["key-one", "key-two"])
+    finally:
+        _gemini.complete = _real_gemini_complete
+        for var in ("SMOKE_ROUTER_KEY", "SMOKE_ROUTER_KEY_2", "SMOKE_ROUTER_KEY_3", "SMOKE_ROUTER_KEY_4"):
+            os.environ.pop(var, None)
+    status = _router.brain_status()
+    check("brain status reports key counts", "key_counts" in status)
+
     print("== Curiosity engine ==")
     from self.editable import curiosity
-    from integrations import model_router as _router
     from integrations import web as _web
 
     # Fake the brain and the web so the test is deterministic and offline.
