@@ -139,6 +139,28 @@ def _version_of(name: str) -> float:
 # 3.5 answered instantly. Newest first, degrade gracefully.
 MODEL_MAX_ATTEMPTS = 2
 
+# Thinking-control escalation. Gemini models burn hidden reasoning tokens
+# against maxOutputTokens (the founder measured ~300 thought tokens for a
+# 4-token answer — HTTP 200 with EMPTY text at small budgets). But each
+# model generation accepts a DIFFERENT control and 400-rejects the others
+# with a generic "invalid argument" that never names the field (the
+# founder's live run proved this). So on any 400 we escalate down this
+# list deterministically instead of parsing error prose:
+#   1. thinkingBudget 0  — 2.5-class models: disables thinking entirely.
+#   2. thinkingLevel low — 3.x-class models: thinking cannot be disabled,
+#      only minimised.
+#   3. None              — no thinking field at all (always accepted);
+#      THINKING_HEADROOM_TOKENS is added to the budget so hidden
+#      reasoning cannot starve the visible answer to empty.
+# The first accepted config is cached per model for the process lifetime.
+_THINKING_CONFIGS = (
+    {"thinkingBudget": 0},
+    {"thinkingLevel": "low"},
+    None,
+)
+THINKING_HEADROOM_TOKENS = 1024
+_config_cache: dict = {}
+
 
 def complete(prompt: str, max_output_tokens: int = 1500, api_key: str = "") -> str:
     """Run a completion, sliding down the model ladder until one answers.
@@ -210,22 +232,27 @@ def _complete_with_model(
     """
     url = BASE_URL.format(model=model)
 
-    # Gemini 3.x models "think" before answering and the hidden thought
-    # tokens are billed AGAINST maxOutputTokens (the founder's own curl
-    # showed ~300 thought tokens burned for a 4-token answer, returning
-    # HTTP 200 with EMPTY text). thinkingBudget 0 disables the hidden
-    # reasoning so the whole budget goes to the visible answer. Models
-    # that cannot disable thinking reject the field with a 400 — we then
-    # retry once without it (see the 400 handler below).
-    payload = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
+    config_idx = _config_cache.get(model, 0)
+
+    def _build_payload() -> dict:
+        generation: dict = {
             "maxOutputTokens": max_output_tokens,
             "temperature": 0.7,
-            "thinkingConfig": {"thinkingBudget": 0},
-        },
-    }
+        }
+        thinking = _THINKING_CONFIGS[config_idx]
+        if thinking is not None:
+            generation["thinkingConfig"] = dict(thinking)
+        else:
+            # No way to suppress thinking on this model: give the hidden
+            # reasoning HEADROOM on top of the caller's budget so the
+            # visible answer is never starved to empty.
+            generation["maxOutputTokens"] = max_output_tokens + THINKING_HEADROOM_TOKENS
+        return {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": generation,
+        }
 
+    payload = _build_payload()
     attempt = 0
     while attempt < MODEL_MAX_ATTEMPTS:
         if time.monotonic() >= deadline:
@@ -293,18 +320,28 @@ def _complete_with_model(
 
         if response.status_code == 400:
             body = response.text[:300]
-            # Some models (e.g. pro-class) cannot disable thinking and
-            # reject thinkingConfig with a 400. Strip it and retry once
-            # instead of declaring the whole ladder dead.
-            if "thinkingConfig" in payload.get("generationConfig", {}) and (
-                "think" in body.lower()
-            ):
+            # REQUEST REJECTION HANDLING. Different Gemini generations
+            # accept different thinking controls and reject the others
+            # with a GENERIC 400 ("Request contains an invalid argument")
+            # that never names the offending field — the founder's live
+            # run proved that message-sniffing does not work. So we never
+            # guess from the error text: any 400 while a thinking config
+            # is still applied means "this model rejects this config" —
+            # escalate deterministically down _THINKING_CONFIGS and retry.
+            # Only a 400 on the BARE request (no thinking config left to
+            # remove) is a genuinely broken request, and only that is
+            # fatal.
+            if config_idx < len(_THINKING_CONFIGS) - 1:
+                config_idx += 1
+                _config_cache[model] = config_idx
                 LOGGER.info(
-                    "Gemini '%s' rejects thinkingBudget 0; retrying without it.", model
+                    "Gemini '%s' rejected the request shape (400); retrying "
+                    "with thinking config %s/%s.",
+                    model, config_idx + 1, len(_THINKING_CONFIGS),
                 )
-                payload["generationConfig"].pop("thinkingConfig", None)
+                payload = _build_payload()
                 continue
-            LOGGER.error("Gemini rejected the request (400): %s", body)
+            LOGGER.error("Gemini '%s' rejected a bare request (400): %s", model, body)
             return "", "fatal"
 
         if response.status_code in (401, 403):

@@ -698,31 +698,103 @@ def main() -> int:
             and _t_payloads[0]["generationConfig"].get("thinkingConfig", {}).get("thinkingBudget") == 0,
         )
 
-    # A model that CANNOT disable thinking rejects thinkingConfig with 400:
-    # the client must strip the field and retry, not declare fatal.
+    print("== Request rejection (400) escalation ==")
+    # The founder's SECOND live run: 3.x models 400-reject thinkingBudget 0
+    # with the GENERIC message "Request contains an invalid argument." —
+    # no field name, so error-text sniffing is impossible. The client must
+    # escalate deterministically: thinkingBudget 0 -> thinkingLevel low ->
+    # bare request, and only call a BARE 400 fatal.
+    _generic_400 = '{"error": {"code": 400, "message": "Request contains an invalid argument.", "status": "INVALID_ARGUMENT"}}'
+
+    # Case A: a 3.x model that accepts thinkingLevel but rejects thinkingBudget.
     _r_calls = []
 
     def _fake_post_reject(url, headers=None, json=None, timeout=None):
-        _r_calls.append(dict(json["generationConfig"]))
+        gen = json["generationConfig"]
+        _r_calls.append(dict(gen))
         resp = _mock.Mock()
-        if "thinkingConfig" in json.get("generationConfig", {}):
+        thinking = gen.get("thinkingConfig", {})
+        if "thinkingBudget" in thinking:
             resp.status_code = 400
-            resp.text = "Budget 0 is invalid; thinking cannot be disabled for this model"
+            resp.text = _generic_400  # generic: never names the field
         else:
             resp.status_code = 200
-            resp.json = lambda: {"candidates": [{"content": {"parts": [{"text": "no-config ok"}]}}]}
+            resp.json = lambda: {"candidates": [{"content": {"parts": [{"text": "level ok"}]}}]}
         return resp
 
+    _gapi._config_cache.clear()
     with _mock.patch.object(_gapi.requests, "post", _fake_post_reject), \
          _mock.patch.object(_gapi.requests, "get", _fake_get_ladder), \
          _mock.patch.object(_gapi.time, "sleep", lambda s: None):
         answer = _gapi.complete("hi", max_output_tokens=10)
-        check("400 thinkingConfig rejection retried without the field", answer == "no-config ok")
+        check("generic 400 escalates thinkingBudget -> thinkingLevel", answer == "level ok")
         check(
-            "retry actually dropped thinkingConfig",
-            len(_r_calls) >= 2 and "thinkingConfig" not in _r_calls[1],
+            "escalation switched to thinkingLevel",
+            len(_r_calls) >= 2
+            and _r_calls[1].get("thinkingConfig", {}).get("thinkingLevel") == "low",
+        )
+        # The accepted config is remembered: the next call must NOT waste
+        # a rejected request on thinkingBudget again.
+        _r_calls.clear()
+        answer2 = _gapi.complete("hi again", max_output_tokens=10)
+        check(
+            "accepted config cached per model (no repeat rejection)",
+            answer2 == "level ok"
+            and _r_calls
+            and "thinkingLevel" in _r_calls[0].get("thinkingConfig", {}),
         )
 
+    # Case B: a model that rejects EVERY thinking field — must fall back to
+    # a bare request with headroom added so thinking can't starve the answer.
+    _b_calls = []
+
+    def _fake_post_bare(url, headers=None, json=None, timeout=None):
+        gen = json["generationConfig"]
+        _b_calls.append(dict(gen))
+        resp = _mock.Mock()
+        if "thinkingConfig" in gen:
+            resp.status_code = 400
+            resp.text = _generic_400
+        else:
+            resp.status_code = 200
+            resp.json = lambda: {"candidates": [{"content": {"parts": [{"text": "bare ok"}]}}]}
+        return resp
+
+    _gapi._config_cache.clear()
+    with _mock.patch.object(_gapi.requests, "post", _fake_post_bare), \
+         _mock.patch.object(_gapi.requests, "get", _fake_get_ladder), \
+         _mock.patch.object(_gapi.time, "sleep", lambda s: None):
+        answer = _gapi.complete("hi", max_output_tokens=10)
+        check("every thinking field rejected -> bare request succeeds", answer == "bare ok")
+        check(
+            "bare request adds thinking headroom to the budget",
+            _b_calls
+            and _b_calls[-1]["maxOutputTokens"] == 10 + _gapi.THINKING_HEADROOM_TOKENS,
+        )
+
+    # Case C: a bare request that STILL 400s is genuinely broken — fatal,
+    # never an infinite retry loop.
+    _f_count = []
+
+    def _fake_post_fatal(url, headers=None, json=None, timeout=None):
+        _f_count.append(1)
+        resp = _mock.Mock()
+        resp.status_code = 400
+        resp.text = _generic_400
+        return resp
+
+    _gapi._config_cache.clear()
+    with _mock.patch.object(_gapi.requests, "post", _fake_post_fatal), \
+         _mock.patch.object(_gapi.requests, "get", _fake_get_ladder), \
+         _mock.patch.object(_gapi.time, "sleep", lambda s: None):
+        answer = _gapi.complete("hi", max_output_tokens=10)
+        check("bare 400 is fatal (returns empty, no infinite loop)", answer == "")
+        check(
+            "fatal 400 bounded to the escalation ladder length",
+            len(_f_count) <= len(_gapi._THINKING_CONFIGS),
+        )
+
+    _gapi._config_cache.clear()
     _gapi._model_cache.clear()
     os.environ.pop(config.ENV_GEMINI_MODEL, None)
     os.environ.pop(config.ENV_GEMINI_API_KEY, None)
