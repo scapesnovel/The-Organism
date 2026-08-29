@@ -188,6 +188,20 @@ def main() -> int:
     identity_core.write_birth_issue(mem, gh3, ident)
     check("birth issue opened", len(gh3.created) == 1)
 
+    # Birth must DEFER (never fall back to a hardcoded identity) when the
+    # brain is unreachable — e.g. a Gemini outage mid-birth.
+    class DeadModel:
+        @staticmethod
+        def complete(prompt, max_output_tokens=1500):
+            return ""
+
+    deferred = False
+    try:
+        identity_core.generate_identity(DeadModel())
+    except identity_core.BirthDeferred:
+        deferred = True
+    check("birth deferred on brain outage (no hardcoded identity)", deferred)
+
     print("== Finance ==")
     from self.editable.finance import financial_summary, record_income, record_expense
 

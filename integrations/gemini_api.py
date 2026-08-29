@@ -23,6 +23,13 @@ DEFAULT_MODEL = "gemini-2.5-flash"  # current free-tier default; override via GE
 
 MAX_RETRIES = 5
 BASE_BACKOFF_SECONDS = 4
+# Hard wall-clock budget for ONE completion call (request time + backoff
+# sleeps). During a Google outage (503s / read timeouts) unbounded retries
+# burned ~5 minutes per call inside CI; with many calls per wake that
+# exhausts the 15-minute job timeout and the Actions minute budget. When
+# the budget is spent we yield: the router rotates to the next key/provider
+# or the organism hibernates until the next wake.
+CALL_BUDGET_SECONDS = 150
 # Bounded quota wait. The previous value (4 HOURS) exceeded the workflow's
 # own timeout and would have burned the entire GitHub Actions free-tier
 # minute budget sleeping. Sleeping is never free inside CI — give quota a
@@ -69,7 +76,15 @@ def complete(prompt: str, max_output_tokens: int = 1500, api_key: str = "") -> s
     }
 
     attempt = 0
+    deadline = time.monotonic() + CALL_BUDGET_SECONDS
     while attempt <= MAX_RETRIES:
+        if time.monotonic() >= deadline:
+            LOGGER.warning(
+                "Gemini call budget (%ss) spent (outage or slow network); "
+                "yielding so the router can rotate keys/providers.",
+                CALL_BUDGET_SECONDS,
+            )
+            return ""
         try:
             # The key travels in a header, never in the URL: query strings
             # end up in proxies, error messages and traceback URLs.

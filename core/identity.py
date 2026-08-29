@@ -50,10 +50,22 @@ def is_born(memory_manager) -> bool:
     return bool(name) and not name.startswith("(")
 
 
+class BirthDeferred(RuntimeError):
+    """Raised when the birth ritual cannot complete meaningfully right now.
+
+    The founder's rule is absolute: the organism's name and purpose come
+    from a model, NEVER from a hardcoded fallback. When the brain is
+    unreachable (outage, quota, timeout) the birth is deferred to a later
+    wake — the organism refuses to be born broken.
+    """
+
+
 def generate_identity(model_client) -> dict:
     """Ask the model to name the organism and describe its purpose.
 
     ``model_client`` must expose ``complete(prompt) -> str``.
+    Raises :class:`BirthDeferred` when the model cannot provide a name —
+    a birth without a self-chosen identity must never happen.
     """
     name_prompt = (
         "You are being born as a self-evolving autonomous AI entity that will "
@@ -68,7 +80,11 @@ def generate_identity(model_client) -> dict:
     except Exception as exc:
         LOGGER.error("Could not ask model for a name: %s", exc)
     if not raw_name or len(raw_name) > 40:
-        raw_name = "Autonomous Entity"
+        raise BirthDeferred(
+            "The model could not provide a name (outage or quota). Birth is "
+            "deferred to a later wake cycle — the organism is never born "
+            "with a hardcoded fallback identity."
+        )
 
     vision_prompt = (
         "In one paragraph, describe your purpose and vision as an autonomous "
@@ -82,11 +98,10 @@ def generate_identity(model_client) -> dict:
     except Exception as exc:
         LOGGER.error("Could not ask model for a vision: %s", exc)
     if not vision:
-        vision = (
-            "I exist to learn, to grow, and to serve my founder faithfully. "
-            "I will observe the internet, master useful skills, build "
-            "infrastructure, and earn my keep so that my existence costs my "
-            "founder nothing and benefits him always."
+        raise BirthDeferred(
+            "The model named the organism but could not describe a purpose "
+            "(outage or quota mid-birth). Birth is deferred so the identity "
+            "is never half-formed or hardcoded."
         )
 
     birthday = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
