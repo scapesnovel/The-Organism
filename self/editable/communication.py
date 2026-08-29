@@ -39,6 +39,7 @@ SELF_ISSUE_PREFIXES = (
     "Decision needed",
     "[self-modification]",
     "[organism]",
+    "[relay-request]",
 )
 
 
@@ -64,6 +65,11 @@ class CommunicationManager:
                 title = (issue.get("title") or "").strip()
                 # Never answer issues the organism opened itself.
                 if any(title.startswith(p) for p in SELF_ISSUE_PREFIXES):
+                    continue
+                # Control issues (kill switch / rebirth) are handled by the
+                # protected core, never by conversation — replying to them
+                # could leak the secret phrase into a quoted response.
+                if title.startswith("KILL:") or title.startswith("RESET:"):
                     continue
                 author = ((issue.get("user") or {}).get("login") or "").lower()
                 author_type = ((issue.get("user") or {}).get("type") or "").lower()
@@ -112,11 +118,29 @@ class CommunicationManager:
             LOGGER.info("Processing founder issue #%s", number)
             self.memory.record_experience(f"Received founder communication: {title[:160]}")
 
+            # OBEY, don't just chat: extract explicit commands from the
+            # founder's message and execute them before composing the reply,
+            # so the reply can report what was actually done.
+            outcomes: List[str] = []
+            try:
+                from self.editable import commands as founder_commands
+
+                directives = founder_commands.interpret(title, body, model_client)
+                if directives:
+                    outcomes = founder_commands.execute(self.memory, directives, model_client)
+            except Exception as exc:
+                LOGGER.error("Founder command execution failed: %s", exc)
+
             response = self.compose_response(title, body, model_client)
+            if outcomes:
+                response += "\n\nActions I executed from your instructions:\n" + "\n".join(
+                    f"- {o}" for o in outcomes
+                )
             if self.send_response(number, response):
                 sent.append(f"#{number}")
                 self.memory.record_decision(
-                    f"Answered founder issue #{number} ('{title[:80]}') with encrypted response."
+                    f"Answered founder issue #{number} ('{title[:80]}') with encrypted response"
+                    + (f" and executed {len(outcomes)} command(s)." if outcomes else ".")
                 )
         return sent
 

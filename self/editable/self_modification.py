@@ -31,10 +31,19 @@ class SelfModificationManager:
     # ------------------------------------------------------------------
     # Proposal lifecycle
     # ------------------------------------------------------------------
-    def propose_change(self, rel_path: str, diff_summary: str, reason: str) -> Optional[int]:
+    def propose_change(
+        self,
+        rel_path: str,
+        diff_summary: str,
+        reason: str,
+        new_content: Optional[str] = None,
+    ) -> Optional[int]:
         """Propose a protected change to the founder via an issue.
 
-        Returns the issue number, or None when the change is not allowed.
+        When ``new_content`` is supplied, the COMPLETE replacement file is
+        embedded in the issue so an APPROVED comment can be applied
+        automatically. Returns the issue number, or None when the change
+        is not allowed.
         """
         if not loyalty.is_protected_path(rel_path):
             LOGGER.warning(
@@ -42,10 +51,15 @@ class SelfModificationManager:
                 rel_path,
             )
             return None
+        content_block = (
+            "\n\nFull replacement content (applied automatically on approval):\n"
+            f"```new-content\n{new_content}\n```\n" if new_content else ""
+        )
         body = (
             f"Path: `{rel_path}`\n\n"
             f"Proposed change:\n{diff_summary}\n\n"
-            f"Reason:\n{reason}\n\n"
+            f"Reason:\n{reason}"
+            f"{content_block}\n\n"
             "To approve, comment exactly: `APPROVED`"
         )
         try:
@@ -67,8 +81,8 @@ class SelfModificationManager:
     def process_approvals(self, apply_callback) -> int:
         """Scan open proposal issues for APPROVED comments and apply them.
 
-        ``apply_callback`` receives (issue_number, rel_path) and performs the
-        actual edit. Returns the number of applied changes.
+        ``apply_callback`` receives (issue_number, rel_path, issue_body) and
+        performs the actual edit. Returns the number of applied changes.
         """
         applied = 0
         try:
@@ -96,7 +110,7 @@ class SelfModificationManager:
             approved = self._has_approval(number)
             if approved:
                 try:
-                    apply_callback(number, rel_path)
+                    apply_callback(number, rel_path, body)
                     applied += 1
                     self.github.comment_on_issue(
                         number,

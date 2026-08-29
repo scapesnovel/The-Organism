@@ -26,9 +26,13 @@ PROTECTED_REL_PATHS: List[str] = [
     "core/encryption.py",
     "core/config.py",
     "core/logger.py",
+    "core/rebirth.py",
     "core/__init__.py",
     ".github/workflows/main.yml",
     "self/protected",
+    # Genesis snapshots are the organism's birth-state record; a rebirth
+    # restores behaviour from them, so the organism must never rewrite them.
+    "self/genesis",
 ]
 
 # Absolute path of the repository root, resolved at import time.

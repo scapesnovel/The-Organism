@@ -1,47 +1,58 @@
-"""Self-study and skill acquisition (editable).
+"""Self-testing and optional focused study (editable).
 
-NOTE: the curated STUDY_PLAN below is LEGACY. The organism's primary
-learning is now the curiosity engine (self/editable/curiosity.py), which
-follows emergent question chains instead of a fixed curriculum. This
-module is kept for its self-test (used as a stage-advancement safety
-floor) and as an optional focused-study tool the organism may still
-invoke deliberately when it wants a structured note on a known subject.
+No curriculum lives here. The founder's rule: the organism starts from
+zero knowledge and learns only through its own curiosity chains
+(``self/editable/curiosity.py``). The old hardcoded STUDY_PLAN violated
+that rule and has been removed.
+
+What remains:
+
+* ``run_self_test`` — capability introspection (can I fetch? parse?
+  reach a brain? is my memory encrypted?). Testing one's own body is not
+  preprogrammed knowledge; it is the safety floor for stage advancement.
+* ``run_study_session`` — an optional tool the organism may invoke
+  DELIBERATELY on a subject it has already discovered through curiosity
+  (the subject comes from its own frontier, never from a list).
 """
 
 from __future__ import annotations
 
 import logging
-from typing import List, Optional
+from typing import Optional
 
 from core.memory import MemoryManager
 
 LOGGER = logging.getLogger("organism.learning")
 
-# Subjects the organism studies in the baby stage (ordered by priority).
-STUDY_PLAN: List[str] = [
-    "How people make money online legitimately (affiliate, content, services, digital products)",
-    "Free AI APIs: Gemini, OpenRouter free models, Groq, Together AI — limits and quotas",
-    "Free hosting and deployment: GitHub Pages, Cloudflare Pages, Vercel free tier, Render free",
-    "Crypto payments: accepting crypto, wallets, payment processors (Coinbase Commerce, NOWPayments)",
-    "Web security essentials: HTTPS, OWASP Top 10, input validation, secrets management",
-    "Content creation pipelines: writing, images, video, and programmatic distribution",
-    "GitHub Actions power user: caching, cron, matrix builds, free tier limits",
-    "Database and storage options for free-tier applications",
-]
-
 LESSONS_FROM_STUDY = 2  # number of lessons to extract per session
 
 
-def run_study_session(memory_manager: MemoryManager, subject_index: Optional[int] = None) -> None:
-    """Run one study session on the next subject in the plan."""
-    state = memory_manager.load_runtime_state()
-    index = subject_index if subject_index is not None else int(state.get("study_index", 0))
-    subject = STUDY_PLAN[index % len(STUDY_PLAN)]
-    LOGGER.info("Study session on: %s", subject)
+def run_study_session(memory_manager: MemoryManager, subject: Optional[str] = None) -> None:
+    """Run one focused study session on a subject the organism chose itself.
 
+    ``subject`` must come from the organism's own curiosity frontier or
+    memory — when omitted, the highest-value open question on the frontier
+    is used. With an empty frontier there is nothing to study (correct for
+    a mind that has not yet found a question worth the time).
+    """
+    if subject is None:
+        try:
+            from self.editable import curiosity
+
+            frontier = curiosity._load_frontier(memory_manager)
+            item = curiosity._pick_next(frontier)
+            subject = item["question"] if item else None
+        except Exception as exc:
+            LOGGER.warning("Could not consult the curiosity frontier: %s", exc)
+            subject = None
+    if not subject:
+        LOGGER.info("No self-chosen subject available; nothing to study.")
+        return
+
+    LOGGER.info("Study session on (self-chosen): %s", subject)
     prompt = (
         "You are teaching an autonomous AI entity that must run on free tiers "
-        "forever. Create a focused study note on this subject:\n\n"
+        "forever. Create a focused study note on this subject IT chose:\n\n"
         f"SUBJECT: {subject}\n\n"
         "Structure the note as:\n"
         "- Key facts (bulleted, concrete)\n"
@@ -63,22 +74,16 @@ def run_study_session(memory_manager: MemoryManager, subject_index: Optional[int
         return
 
     memory_manager.append("memory/knowledge/platforms.md", f"Study note on: {subject}\n\n{note}")
-    memory_manager.record_experience(f"Studied: {subject}")
+    memory_manager.record_experience(f"Studied (self-chosen): {subject}")
 
-    # Extract lessons from the note.
     lessons = [line.strip("- ").strip() for line in note.splitlines() if line.strip().startswith("-")][:LESSONS_FROM_STUDY]
     for lesson in lessons:
         if lesson:
-            memory_manager.record_lesson(f"[study:{subject}] {lesson}")
-
-    # Advance the study pointer.
-    state["study_index"] = (index + 1) % len(STUDY_PLAN)
-    memory_manager.save_runtime_state(state)
-    LOGGER.info("Study pointer advanced to %s", state["study_index"])
+            memory_manager.record_lesson(f"[study:{subject[:80]}] {lesson}")
 
 
 def run_self_test(memory_manager: MemoryManager) -> dict:
-    """Basic self-test on internet operations (Stage transition gate).
+    """Basic self-test on internet operations (stage transition gate).
 
     Returns a dict of {test: passed_bool}.
     """

@@ -8,11 +8,13 @@
     "core/encryption.py",
     "core/config.py",
     "core/logger.py",
+    "core/rebirth.py",
     "core/__init__.py",
     ".github/workflows/main.yml"
   ],
   "protected_directories": [
     "self/protected",
+    "self/genesis",
     "core"
   ],
   "founder": "WISDOM SIFA",
