@@ -73,6 +73,12 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_EVENT_PATH: ${{ github.event_path }}
+          # The organism's entire collected key inventory. Any secret the
+          # founder adds (at the organism's request) becomes usable on the
+          # very next wake — no workflow edit needed. The model router
+          # (integrations/model_router.py) resolves provider keys from here
+          # by env-var name. GitHub still masks every value in the logs.
+          ALL_SECRETS: ${{ toJSON(secrets) }}
         run: python main.py
 
       - name: Commit memory and reports

@@ -5,6 +5,10 @@ requests>=2.31.0
 beautifulsoup4>=4.12.0
 python-gnupg>=0.5.2
 pgpy>=0.6.0
+# pgpy 0.6 imports the stdlib 'imghdr' module, which was removed in
+# Python 3.13 (PEP 594). This shim restores it so the pure-Python PGP
+# fallback keeps working on modern interpreters.
+standard-imghdr>=3.13.0; python_version >= "3.13"
 PyNaCl>=1.5.0
 
 # Optional: enables autonomous Ethereum wallet creation at the Foundation stage.

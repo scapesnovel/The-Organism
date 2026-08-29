@@ -137,6 +137,43 @@ def _init_github() -> "object":
 # ---------------------------------------------------------------------------
 # Birth
 # ---------------------------------------------------------------------------
+def _birth_preconditions_met(github) -> bool:
+    """The birth ritual must only run when it can succeed meaningfully.
+
+    Without a brain (GEMINI_API_KEY) the organism cannot choose its own name
+    or purpose and would be born as a hardcoded fallback — violating the
+    "no hardcoded identity" promise. Without a working GitHub client it
+    cannot announce its birth or hand the PGP key/kill phrase to the
+    founder. In either case the ritual is deferred to a later wake cycle;
+    this is safe because ``is_born`` stays False until the ritual completes.
+    """
+    try:
+        from integrations import model_router
+
+        has_brain = bool(model_router.available_providers())
+    except Exception:
+        has_brain = bool(_env(config.ENV_GEMINI_API_KEY))
+    if not has_brain:
+        logger.warning(
+            "Birth deferred: no model provider key is configured (e.g. "
+            "GEMINI_API_KEY). The organism refuses to be born without a "
+            "brain (its name and purpose must come from a model, never "
+            "from a hardcoded fallback)."
+        )
+        return False
+    repo = _env(config.ENV_REPOSITORY)
+    token = _env(config.ENV_GH_TOKEN) or _env(config.ENV_GITHUB_TOKEN)
+    if not repo or not token:
+        logger.warning(
+            "Birth deferred: GitHub repository/token not available "
+            "(GITHUB_REPOSITORY=%s). The birth announcement and one-time key "
+            "handover require a working GitHub context — run inside Actions.",
+            repo,
+        )
+        return False
+    return True
+
+
 def _handle_birth(model_client, memory: MemoryManager, encryption: Optional[EncryptionManager], github) -> None:
     logger.info("First run detected — beginning the birth ritual.")
     memory.record_event("First run detected. The birth ritual begins.")
@@ -328,6 +365,58 @@ def _count_helper_names(memory: MemoryManager) -> list:
 # ---------------------------------------------------------------------------
 # Daily report & housekeeping
 # ---------------------------------------------------------------------------
+def _request_missing_keys(memory: MemoryManager, communication_manager) -> None:
+    """Ask the founder to add secrets for providers still waiting for keys.
+
+    The organism grows beyond Gemini by registering discovered models in
+    ``api_keys/providers.json``. For each registered provider whose key is
+    not yet resolvable, it opens ONE encrypted issue asking the founder to
+    add the key under the provider's env-var name. Requests are recorded in
+    runtime state so the founder is never nagged twice for the same key.
+    """
+    from integrations import model_router
+
+    status = model_router.brain_status()
+    waiting = status.get("waiting_for_key", [])
+    if not waiting:
+        return
+
+    state = memory.load_runtime_state()
+    already_requested = set(state.get("key_requests_sent", []))
+    newly_requested = []
+
+    for entry in waiting:
+        env_key = entry.get("env_key", "")
+        name = entry.get("name", "?")
+        if not env_key or env_key in already_requested:
+            continue
+        body = (
+            f"I have discovered and registered a new model provider: '{name}'.\n\n"
+            f"To let me use it, please add its API key to the repository "
+            f"secrets under the exact name:\n\n    {env_key}\n\n"
+            f"(Settings -> Secrets and variables -> Actions -> New repository "
+            f"secret.)\n\n"
+            f"I will pick it up automatically on my next wake — no code or "
+            f"workflow change is needed. If you prefer that I not use this "
+            f"provider, simply reply and I will disable it in my registry.\n\n"
+            f"— {memory.read_identity().get('name', 'The Organism')}"
+        )
+        issue_number = communication_manager.ask_founder(
+            f"API key request: {name} ({env_key})", body, labels=["founder", "api-key"]
+        )
+        if issue_number:
+            newly_requested.append(env_key)
+            memory.record_decision(
+                f"Requested the founder to add secret {env_key} for provider '{name}' "
+                f"(issue #{issue_number})."
+            )
+            logger.info("Asked the founder for key %s (provider '%s').", env_key, name)
+
+    if newly_requested:
+        state["key_requests_sent"] = sorted(already_requested | set(newly_requested))
+        memory.save_runtime_state(state)
+
+
 def _daily_report(memory: MemoryManager, communication_manager) -> None:
     """Compose and deliver the encrypted daily report (at most once per day).
 
@@ -496,12 +585,17 @@ def wake() -> int:
     # --- Model client -------------------------------------------------------
     # Consumers (identity, communication, helpers) call ``.complete(...)``,
     # so this must be an object exposing that method — not a bare function.
-    from integrations import gemini_api
+    # The router tries every registered provider in priority order: Gemini
+    # is only the BIRTH brain, not a lifetime dependency. As the organism
+    # discovers new models it registers them (api_keys/providers.json) and
+    # asks the founder to add their keys to the secrets; the router picks
+    # them up automatically on the next wake.
+    from integrations import model_router
 
     class ModelClient:
         @staticmethod
         def complete(prompt: str, max_output_tokens: int = 1500) -> str:
-            return gemini_api.complete(prompt, max_output_tokens=max_output_tokens)
+            return model_router.complete(prompt, max_output_tokens=max_output_tokens)
 
         # Keep the object callable for any legacy call sites.
         def __call__(self, prompt: str, max_output_tokens: int = 1500) -> str:
@@ -509,13 +603,27 @@ def wake() -> int:
 
     model_client = ModelClient()
 
+    # Surface brain status (which providers are usable / waiting for keys).
+    try:
+        status = model_router.brain_status()
+        logger.info(
+            "Brain status: usable=%s, waiting_for_key=%s",
+            status["usable"],
+            [w["name"] for w in status["waiting_for_key"]],
+        )
+    except Exception as exc:
+        logger.warning("Could not compute brain status: %s", exc)
+
     # --- Birth or normal operation ------------------------------------------
     if not identity_core.is_born(memory):
-        try:
-            _handle_birth(model_client, memory, encryption, github)
-        except Exception as exc:
-            logger.error("Birth ritual failed: %s", exc)
-            logger.error(traceback.format_exc())
+        if _birth_preconditions_met(github):
+            try:
+                _handle_birth(model_client, memory, encryption, github)
+            except Exception as exc:
+                logger.error("Birth ritual failed: %s", exc)
+                logger.error(traceback.format_exc())
+        else:
+            logger.info("Waiting to be born. Configure the secrets and re-run.")
     else:
         identity = memory.read_identity()
         logger.info("Identity loaded: %s (stage %s)", identity.get("name", "?"), identity.get("stage", "?"))
@@ -533,6 +641,15 @@ def wake() -> int:
             logger.info("Answered founder issues: %s", answered)
     except Exception as exc:
         logger.error("Founder communication failed: %s", exc)
+
+    # --- Ask the founder for keys of newly discovered providers ---------------
+    # The organism registers models it discovers in api_keys/providers.json.
+    # Whenever a registered provider is still waiting for its key, it asks
+    # the founder (once per provider) to add the key to the secrets store.
+    try:
+        _request_missing_keys(memory, comms)
+    except Exception as exc:
+        logger.error("Key-request flow failed: %s", exc)
 
     # --- Health checks -------------------------------------------------------
     from self.editable.health import run_health_checks, act_on_report, alert_founder

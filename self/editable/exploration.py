@@ -150,9 +150,9 @@ def run_exploration(memory_manager: MemoryManager) -> None:
         "legitimately. Keep it under 140 words."
     )
     try:
-        from integrations import gemini_api
+        from integrations import model_router
 
-        plan = gemini_api.complete(plan_prompt, max_output_tokens=600)
+        plan = model_router.complete(plan_prompt, max_output_tokens=600)
         if plan:
             memory_manager.append("memory/knowledge/trends.md", f"Research plan on '{topic}':\n{plan}")
             LOGGER.info("Recorded research plan on %s", topic)
@@ -185,9 +185,9 @@ def run_curiosity_session(memory_manager: MemoryManager) -> None:
         "and note where the reader could verify it."
     )
     try:
-        from integrations import gemini_api
+        from integrations import model_router
 
-        answer = gemini_api.complete(prompt, max_output_tokens=800)
+        answer = model_router.complete(prompt, max_output_tokens=800)
     except Exception as exc:
         LOGGER.warning("Curiosity session failed: %s", exc)
         answer = ""

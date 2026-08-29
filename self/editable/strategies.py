@@ -113,9 +113,9 @@ def analyse_strategies(memory_manager: MemoryManager) -> Optional[str]:
         "\"top_two\": [id, id], \"reasoning\": \"...\"}"
     )
     try:
-        from integrations import gemini_api
+        from integrations import model_router
 
-        result = gemini_api.complete(prompt, max_output_tokens=800)
+        result = model_router.complete(prompt, max_output_tokens=800)
     except Exception as exc:
         LOGGER.warning("Strategy analysis failed: %s", exc)
         return None

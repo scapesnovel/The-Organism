@@ -49,9 +49,9 @@ def run_study_session(memory_manager: MemoryManager, subject_index: Optional[int
         "— say 'varies' when unsure."
     )
     try:
-        from integrations import gemini_api
+        from integrations import model_router
 
-        note = gemini_api.complete(prompt, max_output_tokens=1000)
+        note = model_router.complete(prompt, max_output_tokens=1000)
     except Exception as exc:
         LOGGER.warning("Study session failed: %s", exc)
         return
@@ -97,9 +97,9 @@ def run_self_test(memory_manager: MemoryManager) -> dict:
         results["html_parse"] = False
 
     try:
-        from integrations import gemini_api
+        from integrations import model_router
 
-        results["api_call"] = "ok" in gemini_api.complete("Reply with exactly: OK", max_output_tokens=8).lower()
+        results["api_call"] = "ok" in model_router.complete("Reply with exactly: OK", max_output_tokens=8).lower()
     except Exception:
         results["api_call"] = False
 
