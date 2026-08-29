@@ -78,7 +78,13 @@ class MemoryManager:
     ) -> None:
         self.encryption = encryption
         self.repo_root = repo_root or config.REPO_ROOT
-        self.plaintext_fallback = encryption is None
+        # Fall back to plaintext unless usable key material is actually
+        # loaded. An EncryptionManager with no organism key (first run, or
+        # missing ORGANISM_PRIVATE_KEY secret) would otherwise crash on
+        # every encrypted write.
+        self.plaintext_fallback = encryption is None or not getattr(
+            encryption, "has_organism_key", lambda: False
+        )()
         if self.plaintext_fallback:
             LOGGER.warning(
                 "Encryption unavailable; memory will degrade to plaintext until "
@@ -127,6 +133,10 @@ class MemoryManager:
         if not content.strip():
             return ""
         if self._is_encrypted(rel) and not self.plaintext_fallback:
+            # Files written before encryption was configured are plaintext;
+            # only wrapped payloads need decryption.
+            if "-----BEGIN ORGANISM ENCRYPTED DATA-----" not in content:
+                return content
             try:
                 return self.encryption.decrypt_file(path)
             except EncryptionError as exc:

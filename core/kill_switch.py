@@ -26,7 +26,10 @@ _KILL_LOG_LINE: str = "KILL SWITCH TRIGGERED — halting all operations permanen
 
 # Marker file written to the repository when the switch is tripped so that
 # every future run exits early even if the issue is later deleted.
-KILL_MARKER: str = "runtime/kill_switch_tripped.txt"
+# It MUST live in a committed directory: the runtime/ tree is git-ignored
+# and wiped by the fresh checkout of every Actions run, which would have
+# silently resurrected a "permanently halted" organism.
+KILL_MARKER: str = "state/kill_switch_tripped.txt"
 
 
 def generate_kill_phrase(length: int = 18) -> str:

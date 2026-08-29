@@ -57,6 +57,11 @@ API_KEYS_DIR: Path = REPO_ROOT / "api_keys"
 LOGS_DIR: Path = REPO_ROOT / "logs"
 SECRETS_DIR: Path = REPO_ROOT / "secrets"
 RUNTIME_DIR: Path = REPO_ROOT / "runtime"
+# Durable, COMMITTED state (birth marker, kill marker, runtime counters).
+# GitHub Actions checks out a fresh workspace on every run, so any state
+# that must survive between wake cycles has to live in a committed path—
+# the git-ignored runtime/ tree is wiped every time.
+STATE_DIR: Path = REPO_ROOT / "state"
 
 # ---------------------------------------------------------------------------
 # Key files.
@@ -64,7 +69,8 @@ RUNTIME_DIR: Path = REPO_ROOT / "runtime"
 IDENTITY_FILE: str = "memory/core/identity.md"      # Encrypted identity blob
 IDENTITY_PUB_FILE: Path = CORE_DIR / "identity.pub"  # Public PGP key (public)
 LOG_FILE: Path = LOGS_DIR / "system.log"
-RUNTIME_STATE_FILE: Path = LOGS_DIR / "runtime_state.json"
+# The run counter / runtime state must persist across runs → committed state/.
+RUNTIME_STATE_FILE: Path = STATE_DIR / "runtime_state.json"
 PRIVATE_KEY_BACKUP_FILE: str = "secrets/private_key_backup.asc"   # Self-encrypted
 FOUNDER_BOOTSTRAP_FILE: str = "secrets/founder_bootstrap.asc"     # Founder-encrypted
 
@@ -89,6 +95,7 @@ REQUIRED_DIRS: List[Path] = [
     LOGS_DIR,
     SECRETS_DIR,
     RUNTIME_DIR,
+    STATE_DIR,
 ]
 
 

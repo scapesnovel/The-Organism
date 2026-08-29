@@ -19,12 +19,16 @@ from core import config
 LOGGER = logging.getLogger("organism.gemini")
 
 BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-DEFAULT_MODEL = "gemini-2.0-flash"
+DEFAULT_MODEL = "gemini-2.5-flash"  # current free-tier default; override via GEMINI_MODEL
 
 MAX_RETRIES = 5
 BASE_BACKOFF_SECONDS = 4
-QUOTA_POLL_SECONDS = 60
-QUOTA_MAX_WAIT_SECONDS = 4 * 3600  # 4 hours
+# Bounded quota wait. The previous value (4 HOURS) exceeded the workflow's
+# own timeout and would have burned the entire GitHub Actions free-tier
+# minute budget sleeping. Sleeping is never free inside CI — give quota a
+# short chance to recover, then yield until the next scheduled wake.
+QUOTA_POLL_SECONDS = 30
+QUOTA_MAX_WAIT_SECONDS = 120
 
 
 class GeminiQuotaExhausted(RuntimeError):
@@ -62,9 +66,11 @@ def complete(prompt: str, max_output_tokens: int = 1500) -> str:
     attempt = 0
     while attempt <= MAX_RETRIES:
         try:
+            # The key travels in a header, never in the URL: query strings
+            # end up in proxies, error messages and traceback URLs.
             response = requests.post(
                 url,
-                params={"key": key},
+                headers={"x-goog-api-key": key},
                 json=payload,
                 timeout=90,
             )
@@ -110,10 +116,17 @@ def complete(prompt: str, max_output_tokens: int = 1500) -> str:
             LOGGER.error("Gemini rejected the request (400): %s", response.text[:300])
             return ""
 
-        if response.status_code == 401:
+        if response.status_code in (401, 403):
             LOGGER.error(
-                "Gemini API key rejected (401). Ask the founder to rotate "
-                "the GEMINI_API_KEY secret."
+                "Gemini API key rejected (%s). Ask the founder to rotate "
+                "the GEMINI_API_KEY secret.", response.status_code,
+            )
+            return ""
+
+        if response.status_code == 404:
+            LOGGER.error(
+                "Gemini model '%s' not found (404). Set the GEMINI_MODEL "
+                "secret to an available model name.", model,
             )
             return ""
 
@@ -121,7 +134,10 @@ def complete(prompt: str, max_output_tokens: int = 1500) -> str:
         attempt += 1
         time.sleep(BASE_BACKOFF_SECONDS * (2 ** min(attempt, 4)))
 
-    raise GeminiQuotaExhausted("Gemini did not succeed after all retries.")
+    # Do NOT crash the whole wake cycle over quota: callers treat an empty
+    # string as "no answer this cycle" and simply retry on the next wake.
+    LOGGER.warning("Gemini did not succeed after all retries; yielding until next wake.")
+    return ""
 
 
 def _wait_for_quota() -> None:

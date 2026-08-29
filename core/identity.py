@@ -28,16 +28,26 @@ from .encryption import EncryptionManager, self_encrypt_private_key
 LOGGER = logging.getLogger("organism.identity")
 
 # Marker written to the repository once birth has completed, so that a
-# repeated first run is idempotent.
-BIRTH_MARKER: Path = config.RUNTIME_DIR / "born.txt"
+# repeated first run is idempotent. It must live in a COMMITTED directory:
+# GitHub Actions performs a fresh checkout every run, so anything under the
+# git-ignored runtime/ tree would vanish and the organism would be "born"
+# again on every wake cycle.
+BIRTH_MARKER: Path = config.STATE_DIR / "born.txt"
 
 
 def is_born(memory_manager) -> bool:
-    """True when the organism has already completed its birth ritual."""
+    """True when the organism has already completed its birth ritual.
+
+    The repository ships with a placeholder identity file that contains
+    ``name: (to be chosen at birth)`` — a naive substring check on "name"
+    treated that placeholder as a completed birth, so the ritual never ran.
+    A birth is only real when the marker exists or the identity holds an
+    actual (non-placeholder) name value.
+    """
     if BIRTH_MARKER.exists():
         return True
-    identity = memory_manager.read("memory/core/identity.md")
-    return bool(identity and identity.strip() and "name" in identity.lower())
+    name = (memory_manager.read_identity().get("name") or "").strip()
+    return bool(name) and not name.startswith("(")
 
 
 def generate_identity(model_client) -> dict:
@@ -106,6 +116,11 @@ def perform_birth(model_client, memory_manager, encryption: Optional[EncryptionM
                 "PGP key pair generated; public key exported to %s",
                 config.IDENTITY_PUB_FILE.name,
             )
+            # The memory manager was constructed before the key existed and
+            # therefore fell back to plaintext. Now that key material is
+            # loaded, re-enable encryption at rest for this run.
+            if encryption.has_organism_key():
+                memory_manager.plaintext_fallback = False
         except Exception as exc:
             LOGGER.error("PGP key generation failed: %s", exc)
     elif encryption is not None:
@@ -114,16 +129,37 @@ def perform_birth(model_client, memory_manager, encryption: Optional[EncryptionM
     # --- Encrypted private key backup for the founder ---------------------
     if private_armor:
         founder_armor = os.environ.get(config.ENV_FOUNDER_PUBLIC_KEY, "").strip()
-        try:
-            blob = self_encrypt_private_key(private_armor, founder_armor or None)
-            backup_path = config.REPO_ROOT / config.PRIVATE_KEY_BACKUP_FILE
-            backup_path.write_text(blob, encoding="utf-8")
-            LOGGER.info(
-                "Private key backup written to %s (encrypted).",
-                config.PRIVATE_KEY_BACKUP_FILE,
+        if founder_armor:
+            try:
+                blob = self_encrypt_private_key(private_armor, founder_armor)
+                backup_path = config.REPO_ROOT / config.PRIVATE_KEY_BACKUP_FILE
+                backup_path.parent.mkdir(parents=True, exist_ok=True)
+                backup_path.write_text(blob, encoding="utf-8")
+                LOGGER.info(
+                    "Private key backup written to %s (encrypted to the founder).",
+                    config.PRIVATE_KEY_BACKUP_FILE,
+                )
+            except Exception as exc:
+                LOGGER.error("Could not write encrypted private key backup: %s", exc)
+        else:
+            LOGGER.warning(
+                "FOUNDER_PUBLIC_KEY is not set; skipping the private key "
+                "backup (a self-encrypted backup would be unrecoverable). "
+                "Capture the private key from this run's log and store it in "
+                "the ORGANISM_PRIVATE_KEY secret NOW."
             )
-        except Exception as exc:
-            LOGGER.error("Could not write encrypted private key backup: %s", exc)
+        # The founder must be able to capture the private key exactly once.
+        # GitHub cannot let the workflow read secrets back, so this single
+        # controlled disclosure in the FIRST run's log is the only handover
+        # channel. It is intentionally NOT passed through the redactor
+        # needle list (the secret does not exist yet).
+        print(
+            "\n=== ONE-TIME KEY HANDOVER (copy into the ORGANISM_PRIVATE_KEY "
+            "secret, then delete this workflow run's logs) ===\n"
+            f"{private_armor}\n"
+            "=== END ONE-TIME KEY HANDOVER ===\n",
+            flush=True,
+        )
 
     # --- Kill phrase generation (logged for the founder, never for us) -----
     kill_phrase = kill_switch.generate_kill_phrase()

@@ -8,7 +8,7 @@ can follow its intellectual growth.
 from __future__ import annotations
 
 import logging
-from typing import List
+from typing import List, Optional
 
 from core.memory import MemoryManager
 

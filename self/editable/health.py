@@ -63,10 +63,13 @@ def run_health_checks(
     except Exception as exc:
         report.add("memory_readable", False, str(exc))
 
-    # 3. GitHub API reachable.
+    # 3. GitHub API reachable. NOTE: /user is forbidden for the built-in
+    # Actions GITHUB_TOKEN (it is an installation token, not a user token),
+    # so probing whoami() failed every run and pushed the organism toward
+    # hibernation. A repository read works with both token types.
     try:
-        login = github.whoami()
-        report.add("github_api", bool(login), login)
+        ok = github.can_reach_repo()
+        report.add("github_api", ok)
     except Exception as exc:
         report.add("github_api", False, str(exc))
 
@@ -118,6 +121,12 @@ def act_on_report(
     """
     if report.passed:
         memory_manager.update_world_state("health", "healthy")
+        # Reset the failure streak on any healthy cycle; otherwise old
+        # failures accumulate forever and eventually force hibernation.
+        state = memory_manager.load_runtime_state()
+        if state.get("health_fail_streak"):
+            state["health_fail_streak"] = 0
+            memory_manager.save_runtime_state(state)
         return True
 
     diagnoses = diagnose(report)
@@ -128,11 +137,7 @@ def act_on_report(
 
     # Count the failure streak.
     state = memory_manager.load_runtime_state()
-    streak = int(state.get("health_fail_streak", 0))
-    if not report.passed:
-        streak += 1
-    else:
-        streak = 0
+    streak = int(state.get("health_fail_streak", 0)) + 1
     state["health_fail_streak"] = streak
     memory_manager.save_runtime_state(state)
 

@@ -23,6 +23,24 @@ RATE_LIMIT_FALLBACK = (
     "I will respond as soon as quota resets. — The Organism"
 )
 
+# Marker embedded (invisibly) in every reply so the organism can recognise
+# its own comments and never answer an issue twice for the same message.
+REPLY_MARKER = "<!-- organism-reply -->"
+
+# Title prefixes of issues the organism creates itself. It must never treat
+# its own announcements/reports as founder messages to answer — that was an
+# infinite feedback loop (each reply re-triggered the workflow, which
+# replied again, forever).
+SELF_ISSUE_PREFIXES = (
+    "[encrypted] ",
+    "Birth announcement",
+    "Daily report",
+    "Health alert",
+    "Decision needed",
+    "[self-modification]",
+    "[organism]",
+)
+
 
 class CommunicationManager:
     def __init__(self, github: github_api.GitHubClient, memory: MemoryManager, encryption) -> None:
@@ -35,10 +53,24 @@ class CommunicationManager:
     # ------------------------------------------------------------------
     def list_founder_issues(self) -> List[dict]:
         """Return open issues that appear to be directed at the organism."""
+        import os
+
+        founder_login = os.environ.get(config.ENV_FOUNDER_GITHUB_USERNAME, "").strip().lower()
         issues: List[dict] = []
         try:
             for issue in self.github.list_open_issues():
                 if issue.get("pull_request"):
+                    continue
+                title = (issue.get("title") or "").strip()
+                # Never answer issues the organism opened itself.
+                if any(title.startswith(p) for p in SELF_ISSUE_PREFIXES):
+                    continue
+                author = ((issue.get("user") or {}).get("login") or "").lower()
+                author_type = ((issue.get("user") or {}).get("type") or "").lower()
+                if author_type == "bot" or author.endswith("[bot]"):
+                    continue
+                # When the founder's login is known, only he may command.
+                if founder_login and author != founder_login:
                     continue
                 issues.append(issue)
         except Exception as exc:
@@ -71,6 +103,8 @@ class CommunicationManager:
         for issue in issues:
             number = issue.get("number")
             title = issue.get("title") or ""
+            if self._already_answered(number):
+                continue
             body = self._decrypt_body(issue)
             if body is None:
                 LOGGER.warning("Issue #%s is not decryptable; skipping.", number)
@@ -113,11 +147,24 @@ class CommunicationManager:
                 body = encrypt_payload_for_founder(plaintext)
             else:
                 body = plaintext
-            self.github.comment_on_issue(issue_number, body)
+            # Tag the comment so future runs recognise it as already answered.
+            self.github.comment_on_issue(issue_number, f"{REPLY_MARKER}\n{body}")
             return True
         except Exception as exc:
             LOGGER.error("Could not post response to issue #%s: %s", issue_number, exc)
             return False
+
+    def _already_answered(self, issue_number: int) -> bool:
+        """True when the organism's reply marker is already on the issue."""
+        try:
+            for comment in self.github.list_issue_comments(issue_number):
+                if REPLY_MARKER in (comment.get("body") or ""):
+                    return True
+        except Exception as exc:
+            LOGGER.warning("Could not inspect comments on #%s: %s", issue_number, exc)
+            # Fail closed: better to skip than to spam duplicate replies.
+            return True
+        return False
 
     def _founder_key_available(self) -> bool:
         try:

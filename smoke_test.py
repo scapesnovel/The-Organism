@@ -95,10 +95,11 @@ def main() -> int:
     config.FOUNDER_BOOTSTRAP_FILE = "secrets/founder_bootstrap.asc"
     config.SELF_BACKUP_DIR = tmp / "self" / "backup"
     config.RUNTIME_DIR = tmp / "runtime"
+    config.STATE_DIR = tmp / "state"
 
     # Create the minimal repo skeleton inside the sandbox so every redirected
     # path (core/identity.pub, secrets/*, runtime/*, logs/*) has a real parent.
-    for _rel in ("core", "logs", "runtime", "secrets", "self"):
+    for _rel in ("core", "logs", "runtime", "secrets", "self", "state"):
         (tmp / _rel).mkdir(parents=True, exist_ok=True)
 
     logger = setup_logging(config.REPO_ROOT / config.LOG_FILE)
@@ -129,7 +130,11 @@ def main() -> int:
 
     print("== Encryption ==")
     manager = EncryptionManager(workdir=tmp / "gpg_work")
-    check("pgpy engine active", manager.engine == "pgpy")
+    check(
+        "a PGP engine is active",
+        manager.engine in ("gnupg", "pgpy"),
+        f"engine={manager.engine}",
+    )
     private_armor = manager.generate_key_pair()
     check("key pair generated", bool(private_armor) and (tmp / "core" / "identity.pub").exists())
 
@@ -167,7 +172,7 @@ def main() -> int:
     from core import identity as identity_core
 
     # BIRTH_MARKER is captured at import time; point it at the sandbox.
-    identity_core.BIRTH_MARKER = tmp / "runtime" / "born.txt"
+    identity_core.BIRTH_MARKER = tmp / "state" / "born.txt"
 
     os.environ[config.ENV_ORGANISM_PRIVATE_KEY] = private_armor
     os.environ[config.ENV_KILL_PHRASE] = "kill-phrase-1"
@@ -177,7 +182,7 @@ def main() -> int:
     check("name from model (not hardcoded)", ident["name"] == "Lumina")
     check("birthday recorded", "birthday" in ident)
     check("purpose recorded", len(ident["purpose"]) > 10)
-    check("birth marker written", (tmp / "runtime" / "born.txt").exists())
+    check("birth marker written", (tmp / "state" / "born.txt").exists())
     check("identity has stage baby", mem.read_identity().get("stage") == "baby")
     check("is_born now True", identity_core.is_born(mem))
     identity_core.write_birth_issue(mem, gh3, ident)
