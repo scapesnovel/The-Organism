@@ -241,6 +241,103 @@ def main() -> int:
     state = mem.load_runtime_state()
     check("runtime state round trip", state.get("run_number") == 1)
 
+    print("== Curiosity engine ==")
+    from self.editable import curiosity
+    from integrations import model_router as _router
+    from integrations import web as _web
+
+    # Fake the brain and the web so the test is deterministic and offline.
+    _real_complete = _router.complete
+    _real_research = _web.research
+
+    def _fake_complete(prompt, max_output_tokens=1500):
+        # Order matters: the reflection prompt EMBEDS the previous answer
+        # (which contains 'CONFIDENCE'), so match reflection format first.
+        if "VALUE:" in prompt and "NEXT:" in prompt:
+            return (
+                "VALUE: 8\n"
+                "OPPORTUNITY: sell tiny automation scripts for crypto\n"
+                "NEXT:\n"
+                "- What is cryptocurrency and how does it work?\n"
+                "- How do I create an Ethereum wallet in code?\n"
+                "- What can I DO with an Ethereum wallet to earn money?"
+            )
+        if "CONFIDENCE" in prompt:
+            return "You need money knowledge, APIs, security.\nCONFIDENCE: high"
+        if "metacognition" in prompt.lower():
+            return "- What do I not know about pricing my services?"
+        return "OK"
+
+    _router.complete = _fake_complete
+    _web.research = lambda q, **kw: "SOURCE: fake (https://x) EXTRACT: digital money needs a wallet"
+    try:
+        # Seed + first exploration
+        frontier = curiosity.ensure_seeded(mem)
+        check("seed planted", len(frontier["questions"]) == 1)
+        check("seed is the purpose question", "earn money" in frontier["questions"][0]["question"])
+
+        stats = curiosity.run_curiosity_cycle(mem)
+        check("questions explored", stats["explored"] >= 1)
+        check("follow-ups spawned (chain grows)", stats["open"] >= 2)
+        check("answers live-verified", stats["verified"] >= 1)
+
+        frontier = curiosity._load_frontier(mem)
+        children = [q for q in frontier["questions"] if q["parent"] is not None]
+        check("chain has parent links", len(children) >= 3)
+        check("wallet question emerged", any("Ethereum wallet" in q["question"] for q in children))
+        check(
+            "high-value chain reinforced",
+            any(q["score"] > 8 for q in children),
+            f"scores={[q['score'] for q in children]}",
+        )
+        goals = mem.read("goals/active_goals.md")
+        check("opportunity fed into goals", "automation scripts" in goals)
+
+        # Abandonment: a starving question dies
+        junk = curiosity._new_question(frontier, "a dead end question nobody cares about?", score=1.0)
+        curiosity.prune_frontier(mem, frontier)
+        check("dead end abandoned", junk["status"] == "abandoned")
+
+        # Duplicate suppression
+        n_before = len(frontier["questions"])
+        check("duplicate detected", curiosity._is_duplicate(frontier, "What is cryptocurrency and how does it work?"))
+
+        # No brain -> question stays open, no crash
+        _router.complete = lambda *a, **k: ""
+        item = curiosity._pick_next(frontier)
+        if item is None:
+            item = curiosity._new_question(frontier, "an open probe question for the brainless test?", score=5.0)
+        ok = curiosity.explore_question(mem, frontier, item)
+        check("brainless cycle keeps question open", ok is False and item["status"] == "open")
+    finally:
+        _router.complete = _real_complete
+        _web.research = _real_research
+
+    print("== Self-assessed stage readiness ==")
+    from main import _self_assess_readiness
+
+    class ReadyModel:
+        @staticmethod
+        def complete(prompt, max_output_tokens=1500):
+            return "READY: yes\nREASON: I understand my environment and opportunities."
+
+    class NotReadyModel:
+        @staticmethod
+        def complete(prompt, max_output_tokens=1500):
+            return "READY: no\nREASON: I have not verified enough earning paths."
+
+    class SilentModel:
+        @staticmethod
+        def complete(prompt, max_output_tokens=1500):
+            return ""
+
+    ready, reason = _self_assess_readiness(mem, ReadyModel(), "baby", "foundation")
+    check("self-assessment yes", ready is True and "environment" in reason)
+    ready, _ = _self_assess_readiness(mem, NotReadyModel(), "baby", "foundation")
+    check("self-assessment no", ready is False)
+    ready, _ = _self_assess_readiness(mem, SilentModel(), "baby", "foundation")
+    check("self-assessment fails closed without brain", ready is False)
+
     # Cleanup
     os.environ.pop(config.ENV_ORGANISM_PRIVATE_KEY, None)
     os.environ.pop(config.ENV_KILL_PHRASE, None)

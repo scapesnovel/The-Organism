@@ -94,6 +94,9 @@ class EncryptionManager:
             import gnupg  # noqa: F401
 
             self._gpg = gnupg.GPG(gnupghome=str(self.workdir))
+            # python-gnupg defaults to latin-1; any non-latin-1 character
+            # (em-dashes, emoji, non-English text) would crash encryption.
+            self._gpg.encoding = "utf-8"
         return self._gpg
 
     # ------------------------------------------------------------------

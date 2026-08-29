@@ -120,20 +120,67 @@ def terminate_helper(memory_manager: MemoryManager, name: str, reason: str) -> N
         LOGGER.error("Could not terminate helper %s: %s", name, exc)
 
 
-def should_spawn_helper(memory_manager: MemoryManager) -> Optional[str]:
-    """Decide whether a new helper is warranted, and for what purpose."""
+def should_spawn_helper(memory_manager: MemoryManager) -> Optional[tuple]:
+    """Decide whether a new helper is warranted, and for what purpose.
+
+    NOT hardcoded: the organism reads its own discovered opportunities and
+    active goals, then asks its mind whether any recurring workload would
+    benefit from a dedicated narrow-purpose helper. The helper's name and
+    purpose EMERGE from what curiosity has found. Returns (name, purpose)
+    or None.
+    """
     active = len(list_helpers(memory_manager))
     if active >= MAX_HELPERS:
         return None
-    # The baby stage always benefits from a trend-monitoring helper.
-    identity = memory_manager.read_identity()
-    stage = identity.get("stage", "baby")
-    registry = helper_registry(memory_manager)
-    if stage == "baby" and "trend_watcher" not in registry:
-        return ("trend_watcher", "Monitor internet trends and report notable changes daily.")
-    if stage in ("foundation", "growth") and "health_watcher" not in registry:
-        return ("health_watcher", "Monitor system health and report failures.")
-    return None
+
+    goals = memory_manager.read("goals/active_goals.md")[-2000:]
+    world = memory_manager.read("memory/world/state.md")[-1200:]
+    existing = ", ".join(list_helpers(memory_manager)) or "(none)"
+    if not goals or "(awaiting" in goals:
+        return None  # nothing discovered yet; a helper would have no job
+
+    prompt = (
+        "You are an autonomous AI organism deciding whether to create a "
+        "narrow-purpose helper sub-agent. Helpers cost attention and free-"
+        "tier resources, so only create one when a RECURRING workload from "
+        "your actual goals justifies it.\n\n"
+        f"YOUR ACTIVE GOALS / DISCOVERED OPPORTUNITIES:\n{goals}\n\n"
+        f"WORLD STATE:\n{world}\n\n"
+        f"EXISTING HELPERS: {existing}\n\n"
+        "Reply in EXACTLY this format (no extra text):\n"
+        "SPAWN: yes|no\n"
+        "NAME: <short_snake_case_name or '-'>\n"
+        "PURPOSE: <one sentence: the narrow recurring task, or '-'>"
+    )
+    try:
+        from integrations import model_router
+
+        reply = model_router.complete(prompt, max_output_tokens=200)
+    except Exception as exc:
+        LOGGER.warning("Helper-spawn assessment failed: %s", exc)
+        return None
+    if not reply:
+        return None
+
+    spawn, name, purpose = False, "", ""
+    for line in reply.splitlines():
+        line = line.strip()
+        if line.upper().startswith("SPAWN:"):
+            spawn = "yes" in line.lower()
+        elif line.upper().startswith("NAME:"):
+            name = line.split(":", 1)[1].strip().strip("-").strip()
+        elif line.upper().startswith("PURPOSE:"):
+            purpose = line.split(":", 1)[1].strip().strip("-").strip()
+
+    if not (spawn and name and purpose):
+        return None
+    # Sanitise the name into a safe directory component.
+    import re
+
+    name = re.sub(r"[^a-z0-9_]", "_", name.lower())[:40].strip("_")
+    if not name or name in helper_registry(memory_manager) or name in list_helpers(memory_manager):
+        return None
+    return (name, purpose[:300])
 
 
 def run_helper_cycle(memory_manager: MemoryManager, name: str, model_client) -> None:

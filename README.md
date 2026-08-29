@@ -10,6 +10,40 @@ to GitHub, configure the secrets below, and the organism will be born on
 its first scheduled run. It names itself, records its own birthday, and
 begins observing the internet — no hardcoded identity, no placeholders.
 
+## How it learns: curiosity chains, not a curriculum
+
+The organism does **not** follow a fixed "learn X, then Y, then Z" plan.
+Its learning is a self-directed curiosity chain
+(`self/editable/curiosity.py`):
+
+1. **Tick 1 — the seed.** The only preprogrammed knowledge is one seed
+   question, restating its purpose: *"What do I need to know to survive
+   and earn?"*
+2. **Explore.** It web-searches the question (DuckDuckGo, free, no key),
+   reads the top sources, and synthesizes an answer grounded in live
+   material (answers are tagged `live-verified` or `model-only`).
+3. **Emergent curiosity.** Every answer is asked: *what NEW questions does
+   this make you curious about?* Follow-ups join a persistent frontier
+   (`memory/world/frontier.json`) with parent links — real chains:
+   *money → crypto → wallets → web3.py → what can a wallet earn?*
+4. **Self-directed priority.** Each wake it explores the highest-value
+   open questions. Valuable answers **reinforce** their chain (follow-ups
+   inherit boosted scores); stale questions decay and are **abandoned** —
+   it learns what to ignore.
+5. **Metacognition.** Every few explorations it asks itself *"what am I
+   still ignorant about that matters?"* and seeds fresh chains from its
+   own blind spots.
+6. **Curiosity finds the money.** Every answer is also graded for earning
+   value; concrete opportunities flow into `goals/active_goals.md`, and
+   helpers are spawned **from discovered workloads**, not a hardcoded list.
+7. **Self-determined stages.** It advances baby → foundation → growth →
+   running only when *it* judges itself ready (an honest model-mediated
+   self-assessment), atop a minimal factual floor (working self-test,
+   encryption on, a substantially explored frontier — and later, a real
+   wallet and real income).
+
+Learning never stops: curiosity cycles keep running in every stage.
+
 ## How it works
 
 - **Brain:** starts on Google Gemini (free tier, `GEMINI_API_KEY`) — but

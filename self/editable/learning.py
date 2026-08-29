@@ -1,8 +1,11 @@
 """Self-study and skill acquisition (editable).
 
-The organism studies curated subjects, extracts lessons, and records new
-skills in its skill memory. Every study session is logged so the founder
-can follow its intellectual growth.
+NOTE: the curated STUDY_PLAN below is LEGACY. The organism's primary
+learning is now the curiosity engine (self/editable/curiosity.py), which
+follows emergent question chains instead of a fixed curriculum. This
+module is kept for its self-test (used as a stage-advancement safety
+floor) and as an optional focused-study tool the organism may still
+invoke deliberately when it wants a structured note on a known subject.
 """
 
 from __future__ import annotations

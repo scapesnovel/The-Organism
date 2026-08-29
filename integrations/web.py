@@ -158,3 +158,79 @@ def crawl_limited(start_url: str, max_pages: int = 8, max_depth: int = 2) -> Lis
                 if link not in visited and not any(link == q[0] for q in queue):
                     queue.append((link, depth + 1))
     return results
+
+# ---------------------------------------------------------------------------
+# Web search (DuckDuckGo — free, no API key, fits the free-tier constraint)
+# ---------------------------------------------------------------------------
+def search(query: str, max_results: int = 6) -> List[Dict[str, str]]:
+    """Search the web via the DuckDuckGo HTML endpoint.
+
+    Returns a list of {"title", "url", "snippet"} dicts. The organism uses
+    this to answer its own curiosity questions from LIVE sources instead of
+    only the model's frozen knowledge. Polite (rate-limited), bounded, and
+    resilient: any failure returns an empty list, never raises.
+    """
+    results: List[Dict[str, str]] = []
+    try:
+        _polite_wait("html.duckduckgo.com")
+        response = _session.post(
+            "https://html.duckduckgo.com/html/",
+            data={"q": query},
+            timeout=DEFAULT_TIMEOUT,
+        )
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, "html.parser")
+        for item in soup.select("div.result")[: max_results * 2]:
+            link = item.select_one("a.result__a")
+            snippet_el = item.select_one("a.result__snippet, div.result__snippet")
+            if not link:
+                continue
+            href = link.get("href") or ""
+            # DDG wraps URLs in a redirect (//duckduckgo.com/l/?uddg=<url>).
+            if "uddg=" in href:
+                try:
+                    from urllib.parse import parse_qs, unquote, urlparse
+
+                    qs = parse_qs(urlparse(href).query)
+                    href = unquote(qs.get("uddg", [href])[0])
+                except Exception:
+                    pass
+            title = link.get_text(strip=True)
+            snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+            if title and href.startswith("http"):
+                results.append({"title": title, "url": href, "snippet": snippet[:300]})
+            if len(results) >= max_results:
+                break
+    except Exception as exc:
+        LOGGER.warning("Web search failed for '%s': %s", query[:80], exc)
+    return results
+
+
+def research(query: str, max_sources: int = 3, text_limit: int = 1800) -> str:
+    """Search + read: gather live source material for a curiosity question.
+
+    Returns a digest string combining snippets and page extracts, ready to
+    be fed to the model alongside the question. Empty string when the web
+    yields nothing (the model then answers from its own knowledge and the
+    organism records that the answer was not live-verified).
+    """
+    hits = search(query, max_results=max_sources * 2)
+    if not hits:
+        return ""
+    parts: List[str] = []
+    read = 0
+    for hit in hits:
+        entry = f"SOURCE: {hit['title']} ({hit['url']})"
+        if hit.get("snippet"):
+            entry += f"\nSNIPPET: {hit['snippet']}"
+        if read < max_sources and robots_allows(hit["url"]):
+            html = fetch(hit["url"])
+            if html:
+                text = extract_text(html, limit=text_limit)
+                if text:
+                    entry += f"\nEXTRACT: {text[:text_limit]}"
+                    read += 1
+        parts.append(entry)
+        if len(parts) >= max_sources * 2:
+            break
+    return "\n\n".join(parts)
