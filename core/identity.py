@@ -60,6 +60,36 @@ class BirthDeferred(RuntimeError):
     """
 
 
+def _atomic_handover(text: str) -> None:
+    """Emit the one-time handover block so no other output can cut into it.
+
+    The founder's first live birth showed logger output (stderr) landing in
+    the MIDDLE of the printed key block, because stdout and stderr are
+    separate buffered streams that GitHub Actions interleaves by arrival
+    time. Flush all logging handlers and both streams first, then write the
+    whole block with one os.write syscall to the stdout file descriptor —
+    a single write cannot be split by Python-level buffering.
+    """
+    import sys
+
+    for handler in logging.getLogger().handlers:
+        try:
+            handler.flush()
+        except Exception:
+            pass
+    try:
+        sys.stderr.flush()
+        sys.stdout.flush()
+    except Exception:
+        pass
+    data = text.encode("utf-8", errors="replace")
+    try:
+        os.write(sys.stdout.fileno(), data)
+    except (OSError, ValueError, AttributeError):
+        # Non-file stdout (tests, embedded interpreters): plain print.
+        print(text, flush=True)
+
+
 def generate_identity(model_client) -> dict:
     """Ask the model to name the organism and describe its purpose.
 
@@ -163,29 +193,41 @@ def perform_birth(model_client, memory_manager, encryption: Optional[EncryptionM
                 "Capture the private key from this run's log and store it in "
                 "the ORGANISM_PRIVATE_KEY secret NOW."
             )
-        # The founder must be able to capture the private key exactly once.
-        # GitHub cannot let the workflow read secrets back, so this single
-        # controlled disclosure in the FIRST run's log is the only handover
-        # channel. It is intentionally NOT passed through the redactor
-        # needle list (the secret does not exist yet).
-        print(
-            "\n=== ONE-TIME KEY HANDOVER (copy into the ORGANISM_PRIVATE_KEY "
-            "secret, then delete this workflow run's logs) ===\n"
-            f"{private_armor}\n"
-            "=== END ONE-TIME KEY HANDOVER ===\n",
-            flush=True,
-        )
-
-    # --- Kill phrase generation (logged for the founder, never for us) -----
+    # --- Kill phrase generation (disclosed in the handover, never logged) --
     kill_phrase = kill_switch.generate_kill_phrase()
     kill_title = kill_switch.kill_issue_title(kill_phrase)
-    LOGGER.info(
-        "Kill phrase generated. To arm the switch, open an issue titled %s "
-        "and store the phrase safely. You can also set the KILL_PHRASE secret "
-        "directly with this value: %s",
-        kill_title,
-        kill_phrase,
+
+    # The founder must be able to capture the private key and kill phrase
+    # exactly once. GitHub cannot let the workflow read secrets back, so
+    # this single controlled disclosure in the FIRST run's log is the only
+    # handover channel. It is intentionally NOT passed through the redactor
+    # needle list (the secrets do not exist yet).
+    #
+    # ATOMIC WRITE, STDOUT ONLY: the founder's first live birth proved that
+    # print() (stdout) and logging (stderr) interleave unpredictably in the
+    # Actions log — a logger line landed INSIDE the armored key block and
+    # nearly corrupted the one-time handover. So: flush every log handler
+    # first, then emit the WHOLE handover (key + kill phrase together) as a
+    # single os.write to stdout that cannot be split by buffering.
+    handover_parts = []
+    if private_armor:
+        handover_parts.append(
+            "SECRET 1 — ORGANISM_PRIVATE_KEY (copy the whole armored block, "
+            "BEGIN and END lines included):\n"
+            f"{private_armor}"
+        )
+    handover_parts.append(
+        "SECRET 2 — KILL_PHRASE (store this value in the KILL_PHRASE "
+        f"secret):\n{kill_phrase}\n"
+        f"(To kill later, open an issue titled: {kill_title})"
     )
+    handover = (
+        "\n=== ONE-TIME KEY HANDOVER (save the secrets below, then delete "
+        "this workflow run's logs) ===\n"
+        + "\n\n".join(handover_parts)
+        + "\n=== END ONE-TIME KEY HANDOVER ===\n"
+    )
+    _atomic_handover(handover)
 
     # --- Identity record (encrypted) --------------------------------------
     record = (

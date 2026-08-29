@@ -188,6 +188,31 @@ def main() -> int:
     identity_core.write_birth_issue(mem, gh3, ident)
     check("birth issue opened", len(gh3.created) == 1)
 
+    # The one-time handover must be ATOMIC: the founder's first live birth
+    # showed a logger line landing INSIDE the printed key block (stdout and
+    # stderr interleave in Actions logs). Both secrets must come out in one
+    # uninterruptible block, kill phrase included.
+    import contextlib as _ctx
+    import io as _io
+
+    _buf = _io.StringIO()
+    with _ctx.redirect_stdout(_buf):
+        identity_core._atomic_handover(
+            "=== ONE-TIME KEY HANDOVER ===\nSECRET 1\nSECRET 2\n=== END ONE-TIME KEY HANDOVER ==="
+        )
+    _out = _buf.getvalue()
+    check("atomic handover falls back to print for non-file stdout", "SECRET 1" in _out and "SECRET 2" in _out)
+    _birth_src = (REPO_ROOT / "core" / "identity.py").read_text(encoding="utf-8")
+    check(
+        "kill phrase disclosed inside the handover block, not via logging",
+        "SECRET 2 — KILL_PHRASE" in _birth_src
+        and "Kill phrase generated" not in _birth_src,
+    )
+    check(
+        "handover emitted with a single os.write (cannot be interleaved)",
+        "os.write(sys.stdout.fileno()" in _birth_src,
+    )
+
     # Birth must DEFER (never fall back to a hardcoded identity) when the
     # brain is unreachable — e.g. a Gemini outage mid-birth.
     class DeadModel:
