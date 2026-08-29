@@ -652,6 +652,77 @@ def main() -> int:
         check("per-model 429 quota slides to sibling immediately", answer == "sibling quota ok")
         check("429 never retried on the same model", _q_calls.count("gemini-3.7-flash") == 1)
 
+    print("== Thinking-model survival (200 with empty text -> slide down) ==")
+    # Gemini 3.x thinking models burn maxOutputTokens on hidden reasoning:
+    # the founder's live run showed 200 responses with EMPTY text sliding
+    # the ladder into more empty responses. The client must (a) send
+    # thinkingBudget 0, (b) ignore thought parts, (c) treat empty-200 as
+    # 'empty' and slide down to a model that actually answers.
+    _t_payloads = []
+    _t_calls = []
+
+    def _fake_post_thinking(url, headers=None, json=None, timeout=None):
+        model = url.split("/models/")[1].split(":")[0]
+        _t_calls.append(model)
+        _t_payloads.append(json)
+        resp = _mock.Mock()
+        if model == "gemini-3.7-flash":
+            # All budget burned on thoughts: 200, no visible text.
+            resp.status_code = 200
+            resp.json = lambda: {
+                "candidates": [{"content": {"parts": []}, "finishReason": "MAX_TOKENS"}],
+                "usageMetadata": {"thoughtsTokenCount": 300},
+            }
+        else:
+            # Older sibling answers, mixing a thought part with the answer.
+            resp.status_code = 200
+            resp.json = lambda: {"candidates": [{"content": {"parts": [
+                {"text": "secret reasoning", "thought": True},
+                {"text": "visible answer"},
+            ]}}]}
+        return resp
+
+    os.environ[config.ENV_GEMINI_MODEL] = "gemini-3.7-flash"
+    with _mock.patch.object(_gapi.requests, "post", _fake_post_thinking), \
+         _mock.patch.object(_gapi.requests, "get", _fake_get_ladder), \
+         _mock.patch.object(_gapi.time, "sleep", lambda s: None):
+        answer = _gapi.complete("hi", max_output_tokens=10)
+        check("empty-200 (thinking burn) slides down to answering model", answer == "visible answer")
+        check(
+            "thought parts never mistaken for the answer",
+            "secret reasoning" not in answer,
+        )
+        check(
+            "thinkingBudget 0 sent to suppress hidden reasoning",
+            _t_payloads
+            and _t_payloads[0]["generationConfig"].get("thinkingConfig", {}).get("thinkingBudget") == 0,
+        )
+
+    # A model that CANNOT disable thinking rejects thinkingConfig with 400:
+    # the client must strip the field and retry, not declare fatal.
+    _r_calls = []
+
+    def _fake_post_reject(url, headers=None, json=None, timeout=None):
+        _r_calls.append(dict(json["generationConfig"]))
+        resp = _mock.Mock()
+        if "thinkingConfig" in json.get("generationConfig", {}):
+            resp.status_code = 400
+            resp.text = "Budget 0 is invalid; thinking cannot be disabled for this model"
+        else:
+            resp.status_code = 200
+            resp.json = lambda: {"candidates": [{"content": {"parts": [{"text": "no-config ok"}]}}]}
+        return resp
+
+    with _mock.patch.object(_gapi.requests, "post", _fake_post_reject), \
+         _mock.patch.object(_gapi.requests, "get", _fake_get_ladder), \
+         _mock.patch.object(_gapi.time, "sleep", lambda s: None):
+        answer = _gapi.complete("hi", max_output_tokens=10)
+        check("400 thinkingConfig rejection retried without the field", answer == "no-config ok")
+        check(
+            "retry actually dropped thinkingConfig",
+            len(_r_calls) >= 2 and "thinkingConfig" not in _r_calls[1],
+        )
+
     _gapi._model_cache.clear()
     os.environ.pop(config.ENV_GEMINI_MODEL, None)
     os.environ.pop(config.ENV_GEMINI_API_KEY, None)

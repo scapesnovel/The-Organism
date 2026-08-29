@@ -183,8 +183,8 @@ def complete(prompt: str, max_output_tokens: int = 1500, api_key: str = "") -> s
             return text
         if verdict == "fatal":
             return ""
-        # "gone" or "busy": widen the ladder once with the live model list,
-        # then keep sliding down to the next candidate.
+        # "gone", "busy" or "empty": widen the ladder once with the live
+        # model list, then keep sliding down to the next candidate.
         if not discovered:
             discovered = True
             for name in list_available_models(key):
@@ -205,15 +205,24 @@ def _complete_with_model(
     """One model's attempts. Returns (text, verdict).
 
     verdict: "ok" | "gone" (404 retired) | "busy" (demand/quota/transport)
+    | "empty" (200 but no text — thinking burn or safety filter)
     | "fatal" (bad key or bad request — no other model can help).
     """
     url = BASE_URL.format(model=model)
 
+    # Gemini 3.x models "think" before answering and the hidden thought
+    # tokens are billed AGAINST maxOutputTokens (the founder's own curl
+    # showed ~300 thought tokens burned for a 4-token answer, returning
+    # HTTP 200 with EMPTY text). thinkingBudget 0 disables the hidden
+    # reasoning so the whole budget goes to the visible answer. Models
+    # that cannot disable thinking reject the field with a 400 — we then
+    # retry once without it (see the 400 handler below).
     payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "maxOutputTokens": max_output_tokens,
             "temperature": 0.7,
+            "thinkingConfig": {"thinkingBudget": 0},
         },
     }
 
@@ -243,8 +252,26 @@ def _complete_with_model(
                 if not candidates:
                     return "", "busy"
                 parts = candidates[0].get("content", {}).get("parts") or []
-                text = "".join(part.get("text", "") for part in parts)
-                return text.strip(), "ok"
+                text = "".join(
+                    part.get("text", "")
+                    for part in parts
+                    if not part.get("thought")  # never mistake thoughts for the answer
+                ).strip()
+                if text:
+                    return text, "ok"
+                # 200 with no text: the model spent the whole token budget
+                # thinking, or a safety filter swallowed the answer. Name
+                # the cause honestly so the founder's logs make sense.
+                finish = (candidates[0].get("finishReason") or "?")
+                thoughts = (
+                    (data.get("usageMetadata") or {}).get("thoughtsTokenCount") or 0
+                )
+                LOGGER.warning(
+                    "Gemini '%s' answered 200 but with EMPTY text "
+                    "(finishReason=%s, thoughtTokens=%s).",
+                    model, finish, thoughts,
+                )
+                return "", "empty"
             except ValueError as exc:
                 LOGGER.error("Could not parse Gemini response: %s", exc)
                 return "", "busy"
@@ -265,7 +292,19 @@ def _complete_with_model(
             return "", "busy"
 
         if response.status_code == 400:
-            LOGGER.error("Gemini rejected the request (400): %s", response.text[:300])
+            body = response.text[:300]
+            # Some models (e.g. pro-class) cannot disable thinking and
+            # reject thinkingConfig with a 400. Strip it and retry once
+            # instead of declaring the whole ladder dead.
+            if "thinkingConfig" in payload.get("generationConfig", {}) and (
+                "think" in body.lower()
+            ):
+                LOGGER.info(
+                    "Gemini '%s' rejects thinkingBudget 0; retrying without it.", model
+                )
+                payload["generationConfig"].pop("thinkingConfig", None)
+                continue
+            LOGGER.error("Gemini rejected the request (400): %s", body)
             return "", "fatal"
 
         if response.status_code in (401, 403):
@@ -291,9 +330,14 @@ def _complete_with_model(
 
 
 def is_healthy() -> bool:
-    """Minimal health probe: ask the model for a one-word answer."""
+    """Minimal health probe: ask the model for a one-word answer.
+
+    The token budget is deliberately generous: thinking models may spend
+    hidden reasoning tokens against maxOutputTokens, and a probe that
+    starves the model of answer room reports false outages.
+    """
     try:
-        result = complete("Reply with exactly: OK", max_output_tokens=8)
+        result = complete("Reply with exactly: OK", max_output_tokens=256)
         return "ok" in result.lower()
     except Exception:
         return False
