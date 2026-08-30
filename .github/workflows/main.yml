@@ -86,20 +86,33 @@ jobs:
         run: |
           git add -A
           if git diff --cached --quiet; then
-            echo "No changes to commit."
+            echo "No new changes to stage."
           else
             git commit -m "organism: persist memory and reports [$(date -u +%Y-%m-%dT%H:%M:%SZ)]" \
               --author "The Organism <organism@localhost>"
-            # Another run (or the founder) may have pushed meanwhile:
-            # rebase instead of failing, then push with bounded retries.
+          fi
+          # Also push commits made in-process during the wake (e.g. the birth
+          # commit) — an unpushed birth means amnesia and a re-birth next run.
+          git fetch origin "${GITHUB_REF_NAME}"
+          AHEAD=$(git rev-list --count "origin/${GITHUB_REF_NAME}..HEAD" || echo 1)
+          if [ "$AHEAD" = "0" ]; then
+            echo "Remote already has everything."
+          else
+            echo "Pushing $AHEAD unpushed commit(s)..."
+            PUSHED=0
             for i in 1 2 3; do
-              git pull --rebase origin "${GITHUB_REF_NAME}" || true
+              git pull --rebase origin "${GITHUB_REF_NAME}" || git rebase --abort || true
               if git push origin HEAD:"${GITHUB_REF_NAME}"; then
+                PUSHED=1
                 break
               fi
               echo "Push attempt $i failed; retrying..."
               sleep 5
             done
+            if [ "$PUSHED" != "1" ]; then
+              echo "::error::PERSIST PUSH FAILED — this wake's memory (possibly a BIRTH) was lost."
+              exit 1
+            fi
           fi
 
       - name: Notify failure via issue
