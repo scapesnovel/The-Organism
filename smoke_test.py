@@ -41,6 +41,12 @@ def check(name: str, condition: bool, detail: str = "") -> None:
 
 class FakeModel:
     def complete(self, prompt: str, max_output_tokens: int = 1500) -> str:
+        if "NAME:" in prompt and "REASON:" in prompt:
+            return (
+                "NAME: Lumina\n"
+                "REASON: From the Latin 'lumen' — light. I want to illuminate "
+                "what I do not yet understand, one curious question at a time."
+            )
         if "name" in prompt.lower() and "choose" in prompt.lower():
             return "Lumina"
         if "purpose" in prompt.lower():
@@ -180,6 +186,8 @@ def main() -> int:
     model = FakeModel()
     ident = identity_core.perform_birth(model, mem, manager2)
     check("name from model (not hardcoded)", ident["name"] == "Lumina")
+    check("name reason recorded (founder mandate)", "lumen" in ident.get("name_reason", "").lower())
+    check("name reason stored in identity file", "lumen" in mem.read_identity().get("name_reason", "").lower())
     check("birthday recorded", "birthday" in ident)
     check("purpose recorded", len(ident["purpose"]) > 10)
     check("birth marker written", (tmp / "state" / "born.txt").exists())
@@ -226,6 +234,65 @@ def main() -> int:
     except identity_core.BirthDeferred:
         deferred = True
     check("birth deferred on brain outage (no hardcoded identity)", deferred)
+
+    # A name WITHOUT a reason must also defer — the founder requires the
+    # organism to explain its choice from its first breath.
+    class NoReasonModel:
+        @staticmethod
+        def complete(prompt, max_output_tokens=1500):
+            return "Zephyr"
+
+    deferred_noreason = False
+    try:
+        identity_core.generate_identity(NoReasonModel())
+    except identity_core.BirthDeferred:
+        deferred_noreason = True
+    check("birth deferred when name has no reason", deferred_noreason)
+
+    # Name reply parser tolerates real-model formatting quirks.
+    n, r = identity_core._parse_name_reply("NAME: Kaleon\nREASON: from kaleidoscope — ever-changing curiosity.")
+    check("name reply parser extracts name+reason", n == "Kaleon" and "kaleidoscope" in r)
+    n2, r2 = identity_core._parse_name_reply("**NAME: Vireo**\nREASON: a small, relentless songbird.")
+    check("parser strips markdown bold", n2 == "Vireo" and r2)
+    n3, _ = identity_core._parse_name_reply("I choose the name Solara because it is bright")
+    check("parser rejects a sentence as a name", n3 == "")
+
+    print("== Armor sanitizer (keys pasted from Actions logs) ==")
+    from core import encryption as enc_core
+
+    # Reproduce EXACTLY what happened live: timestamp prefixes on every
+    # line + a logger line interleaved inside the armored block.
+    _dirty = (
+        "2026-08-29T18:31:57.4599946Z -----BEGIN PGP PRIVATE KEY BLOCK-----\r\n"
+        "2026-08-29T18:31:57.4600271Z \r\n"
+        "2026-08-29T18:31:57.4600647Z lQcYBGqTJZoBEACqCaZ8nO8bJa5E\r\n"
+        "2026-08-29T18:31:57.4624327Z 2026-08-29T18:31:57+0000 | INFO     | organism.identity | Kill phrase generated.\r\n"
+        "2026-08-29T18:31:57.4625396Z BwICIgIGFQoJCAsCBBYCAwECHgcCF4A=\r\n"
+        "2026-08-29T18:31:57.4631720Z =5NAO\r\n"
+        "2026-08-29T18:31:57.4632302Z -----END PGP PRIVATE KEY BLOCK-----\r\n"
+    )
+    _clean = enc_core.sanitize_armor(_dirty)
+    check("sanitizer strips Actions timestamps", "2026-08-29T18:31:57" not in _clean)
+    check("sanitizer drops interleaved log lines", "Kill phrase" not in _clean)
+    check(
+        "sanitizer keeps BEGIN/END and payload",
+        _clean.startswith("-----BEGIN PGP PRIVATE KEY BLOCK-----")
+        and _clean.rstrip().endswith("-----END PGP PRIVATE KEY BLOCK-----")
+        and "lQcYBGqTJZoBEACqCaZ8nO8bJa5E" in _clean,
+    )
+    check(
+        "sanitizer restores blank line after BEGIN",
+        "-----BEGIN PGP PRIVATE KEY BLOCK-----\n\n" in _clean,
+    )
+    # A clean key passed through the sanitizer still imports.
+    _rt = enc_core.sanitize_armor(private_armor)
+    _mgr_rt = enc_core.EncryptionManager(workdir=tmp / "gpg_rt")
+    _rt_ok = True
+    try:
+        _mgr_rt.import_organism_private_key(_rt)
+    except Exception:
+        _rt_ok = False
+    check("sanitized clean key still imports", _rt_ok and _mgr_rt.has_organism_key())
 
     print("== Finance ==")
     from self.editable.finance import financial_summary, record_income, record_expense

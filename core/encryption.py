@@ -45,6 +45,58 @@ class EncryptionError(RuntimeError):
     """Raised when encryption or decryption fails."""
 
 
+def sanitize_armor(blob: str) -> str:
+    """Repair a PGP armor block that was copied from a hostile source.
+
+    The founder captures keys from GitHub Actions logs, where every line
+    carries a timestamp prefix and logger lines can interleave with the
+    block (this ACTUALLY corrupted the first live key handover). This
+    sanitizer makes import forgiving:
+
+    * strips CR and GitHub Actions timestamp prefixes (2026-...Z )
+    * drops interleaved log lines ("| INFO |" etc.) and anything outside
+      the BEGIN/END markers
+    * re-inserts the mandatory blank line between the armor headers and
+      the Base64 body when a paste lost it
+    """
+    import re
+
+    if not blob:
+        return ""
+    lines = []
+    for raw in blob.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = re.sub(r"^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s?", "", raw).rstrip()
+        if re.search(r"\|\s*(INFO|WARNING|ERROR|DEBUG|CRITICAL)\s*\|", line):
+            continue  # interleaved logger line — never part of a key
+        lines.append(line)
+    text = "\n".join(lines)
+    match = re.search(
+        r"(-----BEGIN PGP [A-Z ]+-----)(.*?)(-----END PGP [A-Z ]+-----)",
+        text,
+        re.DOTALL,
+    )
+    if not match:
+        return blob.strip()  # not armored (maybe Base64) — leave for caller
+    begin, body, end = match.group(1), match.group(2), match.group(3)
+    # Separate armor headers (Key: value) from the Base64 payload and
+    # rebuild with the required blank line in between.
+    headers, payload = [], []
+    for ln in body.split("\n"):
+        stripped = ln.strip()
+        if not stripped:
+            continue
+        if not payload and re.match(r"^[A-Za-z-]+: ", stripped):
+            headers.append(stripped)
+        else:
+            payload.append(stripped)
+    rebuilt = [begin]
+    rebuilt.extend(headers)
+    rebuilt.append("")
+    rebuilt.extend(payload)
+    rebuilt.append(end)
+    return "\n".join(rebuilt) + "\n"
+
+
 class EncryptionManager:
     """Handles PGP operations for the organism.
 
@@ -162,6 +214,7 @@ class EncryptionManager:
         """Import the organism's own private key from the environment."""
         if not private_armor or not private_armor.strip():
             raise EncryptionError("Organism private key is empty.")
+        private_armor = sanitize_armor(private_armor)
         if self.engine == "gnupg":
             gpg = self._get_gpg()
             result = gpg.import_keys(private_armor)
@@ -179,10 +232,12 @@ class EncryptionManager:
         public_armor = (public_armor or "").strip()
         if not public_armor:
             raise EncryptionError("Founder public key is empty.")
+        public_armor = sanitize_armor(public_armor)
         # A Base64-only secret is decoded to armored form.
         if not public_armor.startswith("-----BEGIN"):
             try:
                 public_armor = base64.b64decode(public_armor.encode()).decode("utf-8")
+                public_armor = sanitize_armor(public_armor)
             except (binascii.Error, ValueError):
                 pass  # keep the raw string; import will fail with a clear error
         if self.engine == "gnupg":
