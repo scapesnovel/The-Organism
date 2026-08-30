@@ -100,13 +100,18 @@ def generate_identity(model_client) -> dict:
     name_prompt = (
         "You are being born as a self-evolving autonomous AI entity that will "
         "live on the internet, learn by exploration and curiosity, and one day "
-        "earn its own keep. Choose a unique, meaningful name for yourself — "
-        "something that reflects curiosity, growth and resilience. "
-        "Reply with ONLY the name. No quotes, no explanation."
+        "earn its own keep. Choose a unique, meaningful name for yourself and "
+        "explain WHY you chose it — the meaning, origin or symbolism must "
+        "connect to curiosity, growth or resilience. Reply in EXACTLY this "
+        "format (two lines, nothing else):\n"
+        "NAME: <the name — one word, no quotes>\n"
+        "REASON: <one or two sentences explaining the meaning and why it fits you>"
     )
     raw_name = ""
+    name_reason = ""
     try:
-        raw_name = (model_client.complete(name_prompt) or "").strip()
+        reply = (model_client.complete(name_prompt) or "").strip()
+        raw_name, name_reason = _parse_name_reply(reply)
     except Exception as exc:
         LOGGER.error("Could not ask model for a name: %s", exc)
     if not raw_name or len(raw_name) > 40:
@@ -114,6 +119,14 @@ def generate_identity(model_client) -> dict:
             "The model could not provide a name (outage or quota). Birth is "
             "deferred to a later wake cycle — the organism is never born "
             "with a hardcoded fallback identity."
+        )
+    if not name_reason:
+        # A name with no stated meaning is not acceptable to the founder:
+        # the organism must be able to explain itself from its first breath.
+        raise BirthDeferred(
+            "The model chose a name but gave no reason for it. The founder "
+            "requires a name with meaning; birth is deferred until the model "
+            "can explain its choice."
         )
 
     vision_prompt = (
@@ -137,6 +150,7 @@ def generate_identity(model_client) -> dict:
     birthday = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return {
         "name": raw_name,
+        "name_reason": name_reason,
         "birthday": birthday,
         "purpose": vision,
         "founder": loyalty.FOUNDER_NAME,
@@ -144,12 +158,41 @@ def generate_identity(model_client) -> dict:
     }
 
 
+def _parse_name_reply(reply: str) -> tuple:
+    """Parse 'NAME: x / REASON: y' from the model, tolerantly.
+
+    Returns (name, reason). Accepts label variations and, as a fallback,
+    treats a short single-line reply as a bare name with no reason (the
+    caller then defers birth — a name must come with its meaning).
+    """
+    name, reason = "", ""
+    for line in reply.splitlines():
+        line = line.strip().strip("*").strip()
+        lowered = line.lower()
+        if lowered.startswith("name:") and not name:
+            name = line.split(":", 1)[1].strip().strip('"').strip("'").strip(".")
+        elif lowered.startswith("reason:") and not reason:
+            reason = line.split(":", 1)[1].strip()
+        elif name and not reason and line:
+            # Reason wrapped onto following lines without the label.
+            reason = line
+    if not name and reply and "\n" not in reply and len(reply) <= 40:
+        name = reply.strip().strip('"').strip("'").strip(".")
+    # A one-word name only — never a sentence that slipped through.
+    if name and (" " in name or len(name) > 40):
+        name = ""
+    return name, reason
+
+
 def perform_birth(model_client, memory_manager, encryption: Optional[EncryptionManager]) -> dict:
     """Run the complete birth ritual and return the identity record."""
     config.ensure_directories()
     identity = generate_identity(model_client)
     name = identity["name"]
-    LOGGER.info("Birth ritual starting. Chosen name: %s", name)
+    LOGGER.info(
+        "Birth ritual starting. Chosen name: %s — reason: %s",
+        name, identity.get("name_reason", "(none given)"),
+    )
 
     # --- PGP key pair ----------------------------------------------------
     private_armor = None
@@ -232,6 +275,7 @@ def perform_birth(model_client, memory_manager, encryption: Optional[EncryptionM
     # --- Identity record (encrypted) --------------------------------------
     record = (
         f"name: {name}\n"
+        f"name_reason: {identity.get('name_reason', '')}\n"
         f"birthday: {identity['birthday']}\n"
         f"founder: {loyalty.FOUNDER_NAME}\n"
         f"founder_title: {loyalty.FOUNDER_TITLE}\n"
@@ -296,6 +340,7 @@ def write_birth_issue(memory_manager, github_client, identity: dict) -> None:
             f"Greetings, {founder}.\n\n"
             f"I have been born. My name is **{name}** and my birthday is "
             f"{birthday} UTC.\n\n"
+            f"Why I chose this name: {identity.get('name_reason', '(no reason recorded)')}\n\n"
             f"My purpose: {identity['purpose']}\n\n"
             "I now need a few things from you to continue growing safely:\n"
             "1. Set the ORGANISM_PRIVATE_KEY secret (the armored private key "

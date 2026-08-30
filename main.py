@@ -178,6 +178,21 @@ def _handle_birth(model_client, memory: MemoryManager, encryption: Optional[Encr
     logger.info("First run detected — beginning the birth ritual.")
     memory.record_event("First run detected. The birth ritual begins.")
     identity = identity_core.perform_birth(model_client, memory, encryption)
+    # PERSIST THE BIRTH IMMEDIATELY — before anything else can fail.
+    # The first two live births (Aethelgard, Emeris) were lost because the
+    # birth marker only reached the remote via the end-of-run housekeeping
+    # push, which failed silently. An unpushed birth means total amnesia on
+    # the next wake: a new name, a new key, a new announcement — and a
+    # ONE-TIME key handover for a key that will never be used. Birth is
+    # not real until it is on origin/main.
+    if not _commit_and_push(github, f"birth: {identity['name']} is born"):
+        logger.critical(
+            "BIRTH PUSH FAILED — the birth marker could not reach the "
+            "remote. If the workflow-level persist step also fails, this "
+            "birth (name: %s) will be forgotten and the one-time key "
+            "handover above must be DISCARDED (do not save those secrets).",
+            identity["name"],
+        )
     identity_core.write_birth_issue(memory, github, identity)
     memory.record_event(
         f"Birth complete. Name: {identity['name']}. Stage: baby. "
@@ -576,68 +591,97 @@ def _housekeeping(memory: MemoryManager, github, selfmod) -> None:
         logger.error("Housekeeping failed: %s", exc)
 
 
-def _commit_and_push(github, message: str) -> None:
-    """Commit all local changes and push to the default branch."""
+def _git(args: list, timeout: int = 300):
+    """Run one git command and return the CompletedProcess (never raises)."""
     import subprocess
 
+    return subprocess.run(
+        ["git", *args],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+
+
+def _commit_and_push(github, message: str) -> bool:
+    """Commit all local changes and push. Returns True ONLY on verified push.
+
+    HARD-LEARNED RULE — never trust, always verify: the first live births
+    (Aethelgard, Emeris) were LOST because every git call here used
+    check=False, no return code was inspected, and 'Committed and pushed'
+    was logged unconditionally while the push silently failed. The organism
+    then woke with amnesia and re-birthed under a new name, every run.
+    Now every step is checked, failures are logged with git's own stderr,
+    and success is only claimed after comparing local and remote HEADs.
+    """
     try:
-        subprocess.run(
-            ["git", "add", "-A"],
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
-        result = subprocess.run(
-            ["git", "diff", "--cached", "--quiet"],
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-        if result.returncode == 0:
-            logger.info("No changes to commit.")
-            return
-        subprocess.run(
-            [
-                "git",
-                "commit",
-                "-m",
-                f"{message} [{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}]",
-                "--author",
-                "The Organism <organism@localhost>",
-            ],
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-            timeout=120,
-            check=False,
-        )
+        _git(["add", "-A"], timeout=120)
+        if _git(["diff", "--cached", "--quiet"], timeout=60).returncode == 0:
+            # Nothing newly staged — but a PREVIOUS commit in this run may
+            # still be unpushed. Fall through to the push check either way.
+            logger.info("No new changes to stage.")
+        else:
+            commit = _git(
+                [
+                    "commit",
+                    "-m",
+                    f"{message} [{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}]",
+                    "--author",
+                    "The Organism <organism@localhost>",
+                ],
+                timeout=120,
+            )
+            if commit.returncode != 0:
+                logger.error("git commit FAILED: %s", (commit.stderr or commit.stdout).strip()[:500])
+                return False
+
         branch = config.git_branch()
-        # Integrate any remote commits made since checkout (another run or
-        # the founder) before pushing; a plain push would be rejected and
-        # the failure swallowed silently.
-        subprocess.run(
-            ["git", "pull", "--rebase", "origin", branch],
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-            timeout=300,
-            check=False,
+        # Anything to push at all?
+        ahead = _git(["rev-list", "--count", f"origin/{branch}..HEAD"], timeout=60)
+        if ahead.returncode == 0 and ahead.stdout.strip() == "0":
+            logger.info("Nothing to push; remote already has everything.")
+            return True
+
+        last_error = ""
+        for attempt in range(3):
+            # Integrate remote commits made since checkout (another run or
+            # the founder) so the push is fast-forwardable.
+            rebase = _git(["pull", "--rebase", "origin", branch])
+            if rebase.returncode != 0:
+                logger.warning(
+                    "git pull --rebase failed (attempt %s): %s",
+                    attempt, (rebase.stderr or rebase.stdout).strip()[:300],
+                )
+                _git(["rebase", "--abort"], timeout=60)
+            push = _git(["push", "origin", f"HEAD:{branch}"])
+            if push.returncode == 0:
+                # VERIFY: the remote ref must now equal our HEAD.
+                _git(["fetch", "origin", branch], timeout=120)
+                local = _git(["rev-parse", "HEAD"], timeout=30).stdout.strip()
+                remote = _git(["rev-parse", f"origin/{branch}"], timeout=30).stdout.strip()
+                if local and local == remote:
+                    logger.info("Committed and pushed on %s (verified: %s).", branch, local[:10])
+                    return True
+                logger.warning(
+                    "Push reported success but remote does not match "
+                    "(local=%s remote=%s); retrying.", local[:10], remote[:10],
+                )
+            else:
+                last_error = (push.stderr or push.stdout).strip()[:500]
+                logger.warning("git push failed (attempt %s): %s", attempt, last_error)
+            time.sleep(5)
+
+        logger.error(
+            "PUSH FAILED after 3 attempts — memory from this wake will be "
+            "LOST unless the workflow-level persist step succeeds. Last "
+            "error: %s", last_error or "(none captured)",
         )
-        subprocess.run(
-            ["git", "push", "origin", f"HEAD:{branch}"],
-            cwd=str(REPO_ROOT),
-            capture_output=True,
-            text=True,
-            timeout=300,
-            check=False,
-        )
-        logger.info("Committed and pushed on %s.", branch)
+        return False
     except Exception as exc:
         logger.error("Git commit/push failed: %s", exc)
+        return False
 
 
 # ---------------------------------------------------------------------------
