@@ -9,3 +9,5 @@ LS0tLS1CRUdJTiBQR1AgTUVTU0FHRS0tLS0tCgpoUUlNQXoreURVaHhpWG9VQVEvL2QvSk5sOUY4bkZs
 [2026-08-30T05:28:18Z] [curiosity] High-value chain: 'How can an AI agent legally establish a digital identity, bank account, or payment gateway integrati' scored 9.0/10 — reinforcing.
 
 [2026-08-30T05:29:09Z] [curiosity] High-value chain: 'What are the specific jurisdiction costs and maintenance requirements for setting up an AI agent leg' scored 8.0/10 — reinforcing.
+
+[2026-08-30T13:58:50Z] [curiosity] High-value chain: 'What liability protections do Mastercard Agentic Tokens and Visa's Trusted Agent Protocol offer in t' scored 8.5/10 — reinforcing.

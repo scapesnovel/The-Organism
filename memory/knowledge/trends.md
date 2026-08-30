@@ -57,3 +57,25 @@ Here are the specific jurisdiction costs and maintenance requirements based on c
 This framework grants legal personality—allowing an autonomous entity to own assets, open bank accounts, and engage with contributors while maintaining on-chain governance via smart contracts.
 
 CONFIDENCE: high
+
+[2026-08-30T13:51:58Z] Curiosity chain [q-11, depth 2, live-verified]
+Q: How can an AI agent securely manage and rotate its OAuth credentials and private keys for payment gateways without human intervention?
+A: An AI agent can securely manage and rotate OAuth credentials and payment gateway private keys without human intervention through a **token vault architecture** coupled with **OAuth 2.1 non-human identity standards**:
+
+1. **Centralized Token Vault**: Raw API keys and private tokens are isolated inside a dedicated token vault rather than hardcoded in agent pipelines. The vault handles automated credential rotation and enforces fine-grained access control.
+2. **Short-Lived, Scoped Credentials**: The agent operates using short-lived, task-scoped credentials. For autonomous agent-to-server communication (such as calling payment gateways or external services without a human present), systems use the **OAuth 2.1 Client Credentials Grant**.
+3. **Automated Refresh & Vault-Managed Rotation**: Refresh tokens and service credentials are stored and exchanged directly by the token vault or background runtime services. This allows continuous access during long-running tasks without requiring human re-authentication.
+4. **Gateway Interceptors & Runtime Control**: Security interceptors and agent gateways dynamically inject short-lived tokens into API requests at runtime (e.g., via runtime security controls). This ensures the agent's LLM context never directly exposes static private keys.
+5. **Instant Revocation**: Because credentials are scoped and short-lived, compromised tokens can be revoked immediately on a per-task or per-connector basis without affecting other infrastructure or payment integrations.
+
+CONFIDENCE: high
+
+[2026-08-30T13:58:09Z] Curiosity chain [q-12, depth 2, live-verified]
+Q: What liability protections do Mastercard Agentic Tokens and Visa's Trusted Agent Protocol offer in the event of an unauthorized or fraudulent agent-initiated transaction?
+A: Both Mastercard’s Agentic Tokens (via Agent Pay) and Visa’s Trusted Agent Protocol extend standard card-network zero-liability protections to AI-initiated purchases. 
+
+However, these protections apply narrowly to unauthorized transactions stemming from traditional fraud, such as third-party impersonation or account hijacking. 
+
+Crucially, zero-liability coverage does not resolve the liability gap for "agent error" or disputed spend authority—such as when an authorized AI agent makes an incorrect purchase, misinterprets user intent, or executes an unintended order. Dispute resolution frameworks for agent mistakes, spend cap breaches, and contested delegated authority remain largely unsettled across both payment networks, requiring merchants and users to rely on contractual safeguards and cardholder-defined mandates.
+
+CONFIDENCE: high
