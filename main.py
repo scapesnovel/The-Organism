@@ -188,11 +188,14 @@ def _handle_birth(model_client, memory: MemoryManager, encryption: Optional[Encr
     if not _commit_and_push(github, f"birth: {identity['name']} is born"):
         logger.critical(
             "BIRTH PUSH FAILED — the birth marker could not reach the "
-            "remote. If the workflow-level persist step also fails, this "
-            "birth (name: %s) will be forgotten and the one-time key "
-            "handover above must be DISCARDED (do not save those secrets).",
+            "remote, so this birth (name: %s) WILL BE FORGOTTEN. DISCARD "
+            "the one-time key handover above (do not save those secrets). "
+            "No announcement issue will be opened for a birth that cannot "
+            "be remembered. Fix the push permission (see the error above), "
+            "then re-run — the ritual will start fresh.",
             identity["name"],
         )
+        return
     identity_core.write_birth_issue(memory, github, identity)
     memory.record_event(
         f"Birth complete. Name: {identity['name']}. Stage: baby. "
@@ -671,6 +674,19 @@ def _commit_and_push(github, message: str) -> bool:
             else:
                 last_error = (push.stderr or push.stdout).strip()[:500]
                 logger.warning("git push failed (attempt %s): %s", attempt, last_error)
+                if "403" in last_error or "denied" in last_error.lower():
+                    # A permission denial will never heal by retrying.
+                    logger.error(
+                        "Push DENIED (403): the git credential lacks write "
+                        "access. Almost always this means the GH_TOKEN secret "
+                        "is expired or missing the 'Contents: write' "
+                        "permission. FIX: delete the GH_TOKEN secret entirely "
+                        "(the workflow then uses the built-in github.token, "
+                        "which has contents:write) OR replace it with a "
+                        "fine-grained PAT that has Contents + Issues write "
+                        "on this repository."
+                    )
+                    return False
             time.sleep(5)
 
         logger.error(
