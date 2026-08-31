@@ -294,6 +294,61 @@ def main() -> int:
         _rt_ok = False
     check("sanitized clean key still imports", _rt_ok and _mgr_rt.has_organism_key())
 
+    # --- describe_armor: the import error must SAY what is wrong ----------
+    check(
+        "describe_armor: empty secret named as empty",
+        "EMPTY" in enc_core.describe_armor("", "public"),
+    )
+    check(
+        "describe_armor: random text flagged as not-a-key",
+        "not a PGP key" in enc_core.describe_armor("hello world", "public"),
+    )
+    _pub_armor = str(getattr(_mgr_rt, "_organism_key").pubkey) if _mgr_rt.engine == "pgpy" else None
+    if _pub_armor is None:
+        _pub_armor = "-----BEGIN PGP PUBLIC KEY BLOCK-----\n\nabc\n=xxxx\n-----END PGP PUBLIC KEY BLOCK-----"
+    check(
+        "describe_armor: public-where-private-expected detected",
+        "PUBLIC key was pasted" in enc_core.describe_armor(_pub_armor, "private"),
+    )
+    check(
+        "describe_armor: private-where-public-expected detected",
+        "PRIVATE key was pasted" in enc_core.describe_armor(private_armor, "public"),
+    )
+    _truncated = "\n".join(private_armor.splitlines()[: len(private_armor.splitlines()) // 2])
+    check(
+        "describe_armor: truncated paste flagged as TRUNCATED",
+        "TRUNCATED" in enc_core.describe_armor(_truncated, "private"),
+    )
+    check(
+        "describe_armor: ciphertext flagged as encrypted message",
+        "ENCRYPTED MESSAGE" in enc_core.describe_armor(
+            "-----BEGIN PGP MESSAGE-----\n\nabc\n=xxxx\n-----END PGP MESSAGE-----",
+            "public",
+        ),
+    )
+    # Import errors carry the diagnosis all the way up.
+    _mgr_diag = enc_core.EncryptionManager(workdir=tmp / "gpg_diag")
+    try:
+        _mgr_diag.import_founder_public_key("this is definitely not a key")
+        _diag_msg = ""
+    except enc_core.EncryptionError as exc:
+        _diag_msg = str(exc)
+    check(
+        "founder import error explains the problem",
+        "Could not import founder public key" in _diag_msg
+        and "not a PGP key" in _diag_msg,
+    )
+    try:
+        _mgr_diag.import_organism_private_key(_truncated)
+        _diag_msg2 = ""
+    except enc_core.EncryptionError as exc:
+        _diag_msg2 = str(exc)
+    check(
+        "organism import error explains the problem",
+        "Could not import organism private key" in _diag_msg2
+        and "TRUNCATED" in _diag_msg2,
+    )
+
     print("== Finance ==")
     from self.editable.finance import financial_summary, record_income, record_expense
 

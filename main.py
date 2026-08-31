@@ -91,7 +91,14 @@ def _init_encryption() -> Optional[EncryptionManager]:
             manager.import_organism_private_key(private_armor)
             logger.info("Organism PGP key loaded from environment.")
         except Exception as exc:
-            logger.error("Could not import organism private key: %s", exc)
+            logger.error("%s", exc)
+            logger.error(
+                "FIX: open repo Settings > Secrets and variables > Actions, "
+                "edit ORGANISM_PRIVATE_KEY, and paste the ENTIRE armored "
+                "block from the birth handover — from "
+                "'-----BEGIN PGP PRIVATE KEY BLOCK-----' through "
+                "'-----END PGP PRIVATE KEY BLOCK-----' inclusive."
+            )
     else:
         logger.warning("ORGANISM_PRIVATE_KEY secret is not set.")
     founder_armor = _env(config.ENV_FOUNDER_PUBLIC_KEY)
@@ -100,7 +107,14 @@ def _init_encryption() -> Optional[EncryptionManager]:
             manager.import_founder_public_key(founder_armor)
             logger.info("Founder public key loaded from environment.")
         except Exception as exc:
-            logger.error("Could not import founder public key: %s", exc)
+            logger.error("%s", exc)
+            logger.error(
+                "FIX: export YOUR public key (gpg --armor --export <your-id>) "
+                "and paste the whole block — from "
+                "'-----BEGIN PGP PUBLIC KEY BLOCK-----' through "
+                "'-----END PGP PUBLIC KEY BLOCK-----' — into the "
+                "FOUNDER_PUBLIC_KEY secret."
+            )
     else:
         bootstrap = config.REPO_ROOT / config.FOUNDER_BOOTSTRAP_FILE
         if bootstrap.exists():
