@@ -638,7 +638,7 @@ def main() -> int:
     print("== Model router key variants (GEMINI_API_KEY_2, ...) ==")
     from integrations import model_router as _router
 
-    for var in ("SMOKE_ROUTER_KEY", "SMOKE_ROUTER_KEY_2", "SMOKE_ROUTER_KEY_3", "SMOKE_ROUTER_KEY_4"):
+    for var in ("SMOKE_ROUTER_KEY", "SMOKE_ROUTER_KEY_1", "SMOKE_ROUTER_KEY_2", "SMOKE_ROUTER_KEY_3", "SMOKE_ROUTER_KEY_4"):
         os.environ.pop(var, None)
     check("no keys -> empty variant list", _router.resolve_keys("SMOKE_ROUTER_KEY") == [])
     os.environ["SMOKE_ROUTER_KEY"] = "key-one"
@@ -649,12 +649,21 @@ def main() -> int:
         "numbered variants resolved in order",
         _router.resolve_keys("SMOKE_ROUTER_KEY") == ["key-one", "key-two", "key-three"],
     )
-    # A gap in numbering stops the scan (founder controls pool by naming).
+    # The founder counts from _1: GEMINI_API_KEY_1 is a valid variant too.
+    os.environ["SMOKE_ROUTER_KEY_1"] = "key-oneA"
+    check(
+        "the _1 suffix is scanned (founder counts from 1)",
+        _router.resolve_keys("SMOKE_ROUTER_KEY")
+        == ["key-one", "key-oneA", "key-two", "key-three"],
+    )
+    os.environ.pop("SMOKE_ROUTER_KEY_1", None)
+    # A gap in numbering must NOT hide later keys (founder deleted _3,
+    # kept _4 — the _4 key stays usable).
     os.environ.pop("SMOKE_ROUTER_KEY_3", None)
     os.environ["SMOKE_ROUTER_KEY_4"] = "key-four"
     check(
-        "variant scan stops at first gap",
-        _router.resolve_keys("SMOKE_ROUTER_KEY") == ["key-one", "key-two"],
+        "variant scan tolerates numbering gaps",
+        _router.resolve_keys("SMOKE_ROUTER_KEY") == ["key-one", "key-two", "key-four"],
     )
     # Duplicate values collapse.
     os.environ["SMOKE_ROUTER_KEY_3"] = "key-one"
@@ -681,9 +690,56 @@ def main() -> int:
         result = _router._complete_gemini(provider, "hello", 100)
         check("rotation: quota on key 1 falls through to key 2", result == "answer from second key")
         check("rotation tried keys in order", calls[:2] == ["key-one", "key-two"])
+
+        # Exhaustion: when EVERY key fails, the pool must announce it is
+        # exhausted (the organism knows there is nothing more to try) and
+        # the last error surfaces so the router can move to another provider.
+        calls.clear()
+
+        def _all_fail(prompt, max_output_tokens=1500, api_key=""):
+            calls.append(api_key)
+            raise _gemini.GeminiQuotaExhausted("quota gone on " + api_key)
+
+        _gemini.complete = _all_fail
+        import logging as _logging
+
+        class _Capture(_logging.Handler):
+            def __init__(self):
+                super().__init__()
+                self.lines = []
+
+            def emit(self, record):
+                self.lines.append(record.getMessage())
+
+        _cap = _Capture()
+        _router.LOGGER.addHandler(_cap)
+        _exhaust_exc = None
+        try:
+            _router._complete_gemini(provider, "hello", 100)
+        except Exception as exc:
+            _exhaust_exc = exc
+        finally:
+            _router.LOGGER.removeHandler(_cap)
+        check(
+            "exhaustion: every configured key was attempted",
+            sorted(calls) == sorted(_router.resolve_keys("SMOKE_ROUTER_KEY")),
+        )
+        check(
+            "exhaustion: pool announces it has NO MORE KEYS",
+            any("EXHAUSTED" in ln for ln in _cap.lines)
+            and any("NO MORE KEYS" in ln for ln in _cap.lines),
+        )
+        check(
+            "exhaustion: last error surfaces to the router",
+            isinstance(_exhaust_exc, _gemini.GeminiQuotaExhausted),
+        )
+        check(
+            "exhaustion: message tells the founder how to add keys",
+            any("GEMINI_API_KEY_1" in ln for ln in _cap.lines),
+        )
     finally:
         _gemini.complete = _real_gemini_complete
-        for var in ("SMOKE_ROUTER_KEY", "SMOKE_ROUTER_KEY_2", "SMOKE_ROUTER_KEY_3", "SMOKE_ROUTER_KEY_4"):
+        for var in ("SMOKE_ROUTER_KEY", "SMOKE_ROUTER_KEY_1", "SMOKE_ROUTER_KEY_2", "SMOKE_ROUTER_KEY_3", "SMOKE_ROUTER_KEY_4"):
             os.environ.pop(var, None)
     status = _router.brain_status()
     check("brain status reports key counts", "key_counts" in status)
