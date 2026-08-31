@@ -97,6 +97,80 @@ def sanitize_armor(blob: str) -> str:
     return "\n".join(rebuilt) + "\n"
 
 
+def _crc24(data: bytes) -> bytes:
+    """RFC 4880 CRC24 for armor checksums (needed when rebuilding armor)."""
+    crc = 0xB704CE
+    for byte in data:
+        crc ^= byte << 16
+        for _ in range(8):
+            crc <<= 1
+            if crc & 0x1000000:
+                crc ^= 0x1864CFB
+    return (crc & 0xFFFFFF).to_bytes(3, "big")
+
+
+def _bare_payload_tag(blob: str):
+    """If ``blob`` is the bare Base64 BODY of a PGP key (armor lines lost),
+    return ``(payload, checksum_line_or_None, packet_tag)``; else ``None``.
+
+    The founder's real ORGANISM_PRIVATE_KEY paste lost its BEGIN/END lines
+    — only the Base64 body (and maybe the ``=xxxx`` checksum) survived.
+    The key material itself is intact, so import must be able to detect
+    and repair this instead of rejecting it.
+    """
+    import re
+
+    lines = []
+    for raw in (blob or "").replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        line = re.sub(r"^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s?", "", raw).strip()
+        if not line:
+            continue
+        if re.search(r"\|\s*(INFO|WARNING|ERROR|DEBUG|CRITICAL)\s*\|", line):
+            continue
+        lines.append(line)
+    if not lines or "-----BEGIN" in blob:
+        return None
+    checksum = None
+    if re.fullmatch(r"=[A-Za-z0-9+/]{4}", lines[-1]):
+        checksum = lines.pop()
+    payload = "".join(lines)
+    if len(payload) < 64 or not re.fullmatch(r"[A-Za-z0-9+/]+={0,2}", payload):
+        return None
+    try:
+        raw_bytes = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if not raw_bytes or not raw_bytes[0] & 0x80:
+        return None  # not an OpenPGP packet stream
+    first = raw_bytes[0]
+    tag = (first & 0x3F) if first & 0x40 else ((first & 0x3C) >> 2)
+    if checksum is None:
+        checksum = "=" + base64.b64encode(_crc24(raw_bytes)).decode()
+    return payload, checksum, tag
+
+
+def rearmor_bare_payload(blob: str, expected: str) -> str:
+    """Rebuild full armor for a paste that lost its BEGIN/END lines.
+
+    Returns the reconstructed armored block, or "" when ``blob`` is not a
+    bare key body of the ``expected`` kind ("private" or "public").
+    """
+    parsed = _bare_payload_tag(blob)
+    if parsed is None:
+        return ""
+    payload, checksum, tag = parsed
+    if expected == "private" and tag != 5:
+        return ""
+    if expected == "public" and tag != 6:
+        return ""
+    kind = "PRIVATE" if tag == 5 else "PUBLIC"
+    body = "\n".join(payload[i : i + 64] for i in range(0, len(payload), 64))
+    return (
+        f"-----BEGIN PGP {kind} KEY BLOCK-----\n\n{body}\n{checksum}\n"
+        f"-----END PGP {kind} KEY BLOCK-----\n"
+    )
+
+
 def describe_armor(blob: str, expected: str) -> str:
     """Explain in plain words what is wrong with a pasted key.
 
@@ -111,6 +185,19 @@ def describe_armor(blob: str, expected: str) -> str:
     first = blob.splitlines()[0].strip() if blob.splitlines() else ""
     begin = "-----BEGIN PGP "
     if begin not in blob:
+        parsed = _bare_payload_tag(blob)
+        if parsed is not None:
+            tag = parsed[2]
+            found = {5: "a PRIVATE key", 6: "a PUBLIC key"}.get(
+                tag, "an OpenPGP packet (tag %s)" % tag
+            )
+            want = "PRIVATE" if expected == "private" else "PUBLIC"
+            return (
+                "the paste is the bare Base64 BODY of %s (the BEGIN/END "
+                "armor lines were lost in the copy) but this slot needs a "
+                "%s key — repair was not possible because the kinds do "
+                "not match" % (found, want)
+            )
         return (
             "the pasted text is not a PGP key at all — it has no "
             "'-----BEGIN PGP ...-----' line (it starts with: '%s...'). "
@@ -273,6 +360,13 @@ class EncryptionManager:
             )
         raw = private_armor
         private_armor = sanitize_armor(private_armor)
+        # A paste that lost its BEGIN/END lines (bare Base64 body) is
+        # repaired here — this ACTUALLY happened to the founder's
+        # ORGANISM_PRIVATE_KEY secret. The key data was intact.
+        if not private_armor.lstrip().startswith("-----BEGIN"):
+            rebuilt = rearmor_bare_payload(raw, "private")
+            if rebuilt:
+                private_armor = rebuilt
         if self.engine == "gnupg":
             gpg = self._get_gpg()
             result = gpg.import_keys(private_armor)
@@ -310,7 +404,12 @@ class EncryptionManager:
                 public_armor = base64.b64decode(public_armor.encode()).decode("utf-8")
                 public_armor = sanitize_armor(public_armor)
             except (binascii.Error, ValueError):
-                pass  # keep the raw string; import will fail with a clear error
+                pass  # keep the raw string; repair below may still work
+        # A paste that lost its BEGIN/END lines (bare Base64 key body).
+        if not public_armor.lstrip().startswith("-----BEGIN"):
+            rebuilt = rearmor_bare_payload(raw, "public")
+            if rebuilt:
+                public_armor = rebuilt
         if self.engine == "gnupg":
             gpg = self._get_gpg()
             result = gpg.import_keys(public_armor)
@@ -319,7 +418,24 @@ class EncryptionManager:
                     "Could not import founder public key: "
                     + describe_armor(raw, "public")
                 )
-            self._founder_fingerprint = result.fingerprints[0]
+            fingerprint = result.fingerprints[0]
+            # The key must be able to RECEIVE encrypted messages. A
+            # sign-only key ([SC] with no [E] subkey) imports fine but
+            # every later encrypt-to-founder fails mysteriously — this
+            # ACTUALLY happened with the founder's first key. Catch it
+            # here, loudly, at import time.
+            if not self._gnupg_can_encrypt(fingerprint):
+                raise EncryptionError(
+                    "Founder public key imported but it CANNOT receive "
+                    "encrypted messages: the key has no encryption "
+                    "capability (it is sign/certify-only, no [E] subkey). "
+                    "Export a key that includes an encryption subkey — "
+                    "e.g. regenerate with 'gpg --full-generate-key' "
+                    "choosing 'RSA and RSA', or add a subkey with "
+                    "'gpg --quick-add-key <fingerprint> rsa4096 encr' — "
+                    "then update the FOUNDER_PUBLIC_KEY secret."
+                )
+            self._founder_fingerprint = fingerprint
         else:
             import pgpy  # noqa: F401
 
@@ -330,7 +446,61 @@ class EncryptionManager:
                     "Could not import founder public key: "
                     + describe_armor(raw, "public")
                 )
-            self._founder_key = key.pubkey  # type: ignore[attr-defined]
+            pub = key.pubkey
+            if not self._pgpy_can_encrypt(pub):
+                raise EncryptionError(
+                    "Founder public key imported but it CANNOT receive "
+                    "encrypted messages: the key has no encryption "
+                    "capability (it is sign/certify-only, no [E] subkey). "
+                    "Export a key that includes an encryption subkey — "
+                    "e.g. regenerate with 'gpg --full-generate-key' "
+                    "choosing 'RSA and RSA', or add a subkey with "
+                    "'gpg --quick-add-key <fingerprint> rsa4096 encr' — "
+                    "then update the FOUNDER_PUBLIC_KEY secret."
+                )
+            self._founder_key = pub  # type: ignore[attr-defined]
+
+    def _gnupg_can_encrypt(self, fingerprint: str) -> bool:
+        """True when the key (or a subkey) has the encrypt capability."""
+        try:
+            for entry in self._get_gpg().list_keys(keys=[fingerprint]):
+                caps = (entry.get("cap") or "").lower()
+                if "e" in caps:
+                    return True
+                for sub in (entry.get("subkey_info") or {}).values():
+                    if "e" in (sub.get("cap") or "").lower():
+                        return True
+                # Older python-gnupg exposes subkeys as lists of tuples
+                # [keyid, cap, fingerprint?] instead of subkey_info.
+                for sub in entry.get("subkeys") or []:
+                    if len(sub) > 1 and "e" in str(sub[1]).lower():
+                        return True
+        except Exception:
+            return True  # never block import on an introspection failure
+        return False
+
+    @staticmethod
+    def _pgpy_can_encrypt(pub) -> bool:
+        """True when a pgpy public key (or a subkey) can encrypt."""
+        try:
+            from pgpy.constants import KeyFlags
+
+            wanted = {KeyFlags.EncryptCommunications, KeyFlags.EncryptStorage}
+            candidates = [pub] + list(getattr(pub, "subkeys", {}).values())
+            for cand in candidates:
+                for uid in getattr(cand, "userids", []) or []:
+                    sig = getattr(uid, "selfsig", None)
+                    flags = getattr(sig, "key_flags", None) if sig else None
+                    if flags and wanted & set(flags):
+                        return True
+                flags = set()
+                for sig in getattr(cand, "self_signatures", []) or []:
+                    flags |= set(getattr(sig, "key_flags", []) or [])
+                if wanted & flags:
+                    return True
+        except Exception:
+            return True  # never block import on an introspection failure
+        return False
 
     # ------------------------------------------------------------------
     # Public primitives

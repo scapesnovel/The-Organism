@@ -349,6 +349,116 @@ def main() -> int:
         and "TRUNCATED" in _diag_msg2,
     )
 
+    # --- bare Base64 body repair (the founder's REAL paste mistake) --------
+    # Run #11's ORGANISM_PRIVATE_KEY secret was the key body starting
+    # 'lQcYBG...' with the BEGIN/END armor lines lost. Import must rebuild
+    # the armor and recover the key.
+    _body_lines = [
+        l for l in private_armor.splitlines()
+        if l and not l.startswith("-----") and ": " not in l
+    ]
+    _bare_body = "\n".join(l for l in _body_lines if not l.startswith("="))
+    check("bare body resembles the real paste", _bare_body.startswith("lQ"))
+    _mgr_bare = enc_core.EncryptionManager(workdir=tmp / "gpg_bare")
+    _bare_ok = True
+    try:
+        _mgr_bare.import_organism_private_key(_bare_body)
+    except Exception:
+        _bare_ok = False
+    check(
+        "bare-body private key repaired and imported",
+        _bare_ok and _mgr_bare.has_organism_key(),
+    )
+    if _bare_ok and _mgr_bare.has_organism_key():
+        _ct = _mgr_bare.encrypt_to_self("memories survive")
+        check(
+            "repaired key round-trips encryption",
+            _mgr_bare.decrypt_from_self(_ct) == "memories survive",
+        )
+    # Same repair with the '=xxxx' checksum line still present in the paste.
+    _bare_with_crc = "\n".join(_body_lines)
+    _mgr_bare2 = enc_core.EncryptionManager(workdir=tmp / "gpg_bare2")
+    _bare2_ok = True
+    try:
+        _mgr_bare2.import_organism_private_key(_bare_with_crc)
+    except Exception:
+        _bare2_ok = False
+    check(
+        "bare body with checksum line also repaired",
+        _bare2_ok and _mgr_bare2.has_organism_key(),
+    )
+    # A bare PRIVATE body pasted in the PUBLIC slot must NOT repair —
+    # and the error must name the kind mismatch.
+    _mgr_bare3 = enc_core.EncryptionManager(workdir=tmp / "gpg_bare3")
+    try:
+        _mgr_bare3.import_founder_public_key(_bare_body)
+        _mismatch_msg = ""
+    except enc_core.EncryptionError as exc:
+        _mismatch_msg = str(exc)
+    check(
+        "bare PRIVATE body in PUBLIC slot refused with kind diagnosis",
+        "bare Base64 BODY" in _mismatch_msg and "PRIVATE key" in _mismatch_msg,
+    )
+    # rearmor_bare_payload rejects non-key data outright.
+    check(
+        "rearmor rejects non-key Base64",
+        enc_core.rearmor_bare_payload("aGVsbG8gd29ybGQ=" * 8, "private") == "",
+    )
+
+    # --- founder key must be able to RECEIVE encrypted messages ------------
+    # The founder's first real key was sign/certify-only (no [E] subkey):
+    # it imported fine, then every encrypt-to-founder failed mysteriously
+    # ('Encryption to founder failed: KEY_CONSIDERED ...'). Import must
+    # refuse such a key with clear guidance.
+    import pgpy as _pgpy
+    from pgpy.constants import (
+        PubKeyAlgorithm as _PKA,
+        KeyFlags as _KF,
+        HashAlgorithm as _HA,
+        SymmetricKeyAlgorithm as _SKA,
+        CompressionAlgorithm as _CA,
+    )
+
+    _signonly = _pgpy.PGPKey.new(_PKA.RSAEncryptOrSign, 1024)
+    _uid = _pgpy.PGPUID.new("Sign Only Founder")
+    _signonly.add_uid(
+        _uid,
+        usage={_KF.Sign, _KF.Certify},  # NO encrypt flags — like the real v1 key
+        hashes=[_HA.SHA256],
+        ciphers=[_SKA.AES256],
+        compression=[_CA.ZIP],
+    )
+    _mgr_cap = enc_core.EncryptionManager(workdir=tmp / "gpg_cap")
+    _cap_msg = ""
+    try:
+        _mgr_cap.import_founder_public_key(str(_signonly.pubkey))
+    except enc_core.EncryptionError as exc:
+        _cap_msg = str(exc)
+    check(
+        "sign-only founder key refused at import",
+        "CANNOT receive encrypted messages" in _cap_msg,
+    )
+    check(
+        "sign-only refusal tells the founder how to fix the key",
+        "quick-add-key" in _cap_msg,
+    )
+    # An encryption-capable key (the organism's own pubkey) still imports
+    # as a founder key and can actually receive a message.
+    _mgr_cap2 = enc_core.EncryptionManager(workdir=tmp / "gpg_cap2")
+    _cap2_ok = True
+    try:
+        _mgr_cap2.import_founder_public_key(
+            config.IDENTITY_PUB_FILE.read_text(encoding="utf-8")
+        )
+        _ct_f = _mgr_cap2.encrypt_to_founder("capability check")
+    except Exception:
+        _cap2_ok = False
+        _ct_f = ""
+    check(
+        "encryption-capable founder key imports and encrypts",
+        _cap2_ok and _ct_f.startswith("-----BEGIN PGP MESSAGE"),
+    )
+
     print("== Finance ==")
     from self.editable.finance import financial_summary, record_income, record_expense
 
