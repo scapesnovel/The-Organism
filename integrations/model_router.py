@@ -162,29 +162,28 @@ def resolve_key(env_key: str) -> Optional[str]:
     return value or None
 
 
-# Maximum numbered key variants scanned per provider (BASE, BASE_2 .. BASE_N).
-MAX_KEY_VARIANTS = 10
+# Maximum numbered key variants scanned per provider (BASE, BASE_1 .. BASE_N).
+MAX_KEY_VARIANTS = 20
 
 
 def resolve_keys(env_key: str) -> List[str]:
-    """Resolve EVERY key variant for a provider: BASE, BASE_2, BASE_3, ...
+    """Resolve EVERY key variant for a provider: BASE, BASE_1, BASE_2, ...
 
     The founder may add extra keys for the SAME provider (e.g. a second
     free-tier Gemini key under ``GEMINI_API_KEY_2``) so the organism has
-    variety when one key's quota runs out. Variants follow the naming rule
-    ``<ENV_KEY>_<n>`` for n = 2..MAX_KEY_VARIANTS. Scanning stops at the
-    first missing number so the founder controls the pool size simply by
-    which secrets exist. Returned in order; duplicates removed.
+    variety when one key's quota runs out. ALL numbered suffixes from
+    ``_1`` to ``_MAX_KEY_VARIANTS`` are scanned — gaps in the numbering
+    are tolerated (the founder may delete ``_2`` and keep ``_3``; the
+    ``_3`` key must not become invisible). The pool size is controlled
+    simply by which secrets exist. Returned in order; duplicates removed.
     """
     keys: List[str] = []
     base = resolve_key(env_key)
     if base:
         keys.append(base)
-    for n in range(2, MAX_KEY_VARIANTS + 1):
+    for n in range(1, MAX_KEY_VARIANTS + 1):
         variant = resolve_key(f"{env_key}_{n}")
-        if not variant:
-            break  # numbering is contiguous by convention; stop at first gap
-        if variant not in keys:
+        if variant and variant not in keys:
             keys.append(variant)
     return keys
 
@@ -212,6 +211,8 @@ def _complete_gemini(provider: Dict, prompt: str, max_output_tokens: int) -> str
     keys = resolve_keys(provider.get("env_key", config.ENV_GEMINI_API_KEY))
     if not keys:
         raise RuntimeError("No Gemini key resolvable.")
+    if len(keys) > 1:
+        LOGGER.info("Gemini key pool: %s key(s) configured.", len(keys))
     last_exc: Optional[Exception] = None
     for index, key in enumerate(keys, 1):
         try:
@@ -220,15 +221,31 @@ def _complete_gemini(provider: Dict, prompt: str, max_output_tokens: int) -> str
             )
             if result:
                 if index > 1:
-                    LOGGER.info("Answered via Gemini key variant #%s.", index)
+                    LOGGER.info(
+                        "Answered via Gemini key #%s of %s.", index, len(keys)
+                    )
                 return result
+            LOGGER.warning(
+                "Gemini key #%s of %s produced no answer; %s",
+                index, len(keys),
+                "trying next key." if index < len(keys)
+                else "NO MORE KEYS to try.",
+            )
         except Exception as exc:  # quota, auth, transport — try the next key
             last_exc = exc
             LOGGER.warning(
-                "Gemini key variant #%s failed (%s); trying next variant.",
-                index,
+                "Gemini key #%s of %s failed (%s); %s",
+                index, len(keys),
                 type(exc).__name__,
+                "trying next key." if index < len(keys)
+                else "NO MORE KEYS to try.",
             )
+    LOGGER.warning(
+        "Gemini key pool EXHAUSTED: all %s key(s) failed this call. "
+        "Add more keys as secrets named GEMINI_API_KEY_1, GEMINI_API_KEY_2, "
+        "... (up to _%s) to deepen the pool.",
+        len(keys), MAX_KEY_VARIANTS,
+    )
     if last_exc is not None:
         raise last_exc
     return ""

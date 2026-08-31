@@ -97,6 +97,60 @@ def sanitize_armor(blob: str) -> str:
     return "\n".join(rebuilt) + "\n"
 
 
+def describe_armor(blob: str, expected: str) -> str:
+    """Explain in plain words what is wrong with a pasted key.
+
+    ``expected`` is ``"private"`` or ``"public"``. The founder pastes keys
+    into GitHub secrets by hand; when an import fails the error must say
+    exactly WHAT he pasted so he can fix the copy, not guess. This function
+    never includes key material in its output — only shape observations.
+    """
+    blob = (blob or "").strip()
+    if not blob:
+        return "the secret is EMPTY (nothing was pasted)"
+    first = blob.splitlines()[0].strip() if blob.splitlines() else ""
+    begin = "-----BEGIN PGP "
+    if begin not in blob:
+        return (
+            "the pasted text is not a PGP key at all — it has no "
+            "'-----BEGIN PGP ...-----' line (it starts with: '%s...'). "
+            "Copy the WHOLE armored block including the BEGIN and END lines."
+            % first[:40]
+        )
+    has_priv = "BEGIN PGP PRIVATE KEY BLOCK" in blob
+    has_pub = "BEGIN PGP PUBLIC KEY BLOCK" in blob
+    has_msg = "BEGIN PGP MESSAGE" in blob
+    if expected == "private" and has_pub and not has_priv:
+        return (
+            "a PUBLIC key was pasted where the PRIVATE key belongs — "
+            "ORGANISM_PRIVATE_KEY needs the block that says "
+            "'BEGIN PGP PRIVATE KEY BLOCK' (SECRET 1 from the handover)"
+        )
+    if expected == "public" and has_priv and not has_pub:
+        return (
+            "a PRIVATE key was pasted where the PUBLIC key belongs — "
+            "FOUNDER_PUBLIC_KEY needs the block that says "
+            "'BEGIN PGP PUBLIC KEY BLOCK' (never paste a private key here)"
+        )
+    if has_msg and not (has_priv or has_pub):
+        return (
+            "an ENCRYPTED MESSAGE block was pasted, not a key — this looks "
+            "like ciphertext (BEGIN PGP MESSAGE), which cannot be imported"
+        )
+    kind = "PRIVATE KEY BLOCK" if expected == "private" else "PUBLIC KEY BLOCK"
+    if f"END PGP {kind}" not in blob:
+        return (
+            "the block has a BEGIN line but no matching END line — the "
+            "paste is TRUNCATED; copy all the way through "
+            "'-----END PGP %s-----'" % kind
+        )
+    return (
+        "the block looks structurally complete but the key data inside is "
+        "corrupt (characters lost or altered in the copy) — re-copy it in "
+        "one selection, or use the 'Raw' log view to avoid wrapped lines"
+    )
+
+
 class EncryptionManager:
     """Handles PGP operations for the organism.
 
@@ -213,25 +267,42 @@ class EncryptionManager:
     def import_organism_private_key(self, private_armor: str) -> None:
         """Import the organism's own private key from the environment."""
         if not private_armor or not private_armor.strip():
-            raise EncryptionError("Organism private key is empty.")
+            raise EncryptionError(
+                "Could not import organism private key: "
+                + describe_armor(private_armor, "private")
+            )
+        raw = private_armor
         private_armor = sanitize_armor(private_armor)
         if self.engine == "gnupg":
             gpg = self._get_gpg()
             result = gpg.import_keys(private_armor)
             if not result or not result.fingerprints:
-                raise EncryptionError("Could not import organism private key.")
+                raise EncryptionError(
+                    "Could not import organism private key: "
+                    + describe_armor(raw, "private")
+                )
             self._organism_fingerprint = result.fingerprints[0]
         else:
             import pgpy  # noqa: F401
 
-            key, _ = pgpy.PGPKey.from_blob(private_armor)
+            try:
+                key, _ = pgpy.PGPKey.from_blob(private_armor)
+            except Exception:
+                raise EncryptionError(
+                    "Could not import organism private key: "
+                    + describe_armor(raw, "private")
+                )
             self._organism_key = key  # type: ignore[attr-defined]
 
     def import_founder_public_key(self, public_armor: str) -> None:
         """Import the founder's public key (armored or bare Base64)."""
         public_armor = (public_armor or "").strip()
         if not public_armor:
-            raise EncryptionError("Founder public key is empty.")
+            raise EncryptionError(
+                "Could not import founder public key: "
+                + describe_armor(public_armor, "public")
+            )
+        raw = public_armor
         public_armor = sanitize_armor(public_armor)
         # A Base64-only secret is decoded to armored form.
         if not public_armor.startswith("-----BEGIN"):
@@ -244,12 +315,21 @@ class EncryptionManager:
             gpg = self._get_gpg()
             result = gpg.import_keys(public_armor)
             if not result or not result.fingerprints:
-                raise EncryptionError("Could not import founder public key.")
+                raise EncryptionError(
+                    "Could not import founder public key: "
+                    + describe_armor(raw, "public")
+                )
             self._founder_fingerprint = result.fingerprints[0]
         else:
             import pgpy  # noqa: F401
 
-            key, _ = pgpy.PGPKey.from_blob(public_armor)
+            try:
+                key, _ = pgpy.PGPKey.from_blob(public_armor)
+            except Exception:
+                raise EncryptionError(
+                    "Could not import founder public key: "
+                    + describe_armor(raw, "public")
+                )
             self._founder_key = key.pubkey  # type: ignore[attr-defined]
 
     # ------------------------------------------------------------------
