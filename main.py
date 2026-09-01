@@ -136,6 +136,49 @@ def _init_encryption() -> Optional[EncryptionManager]:
     return manager
 
 
+def _ensure_private_key_backup(encryption: Optional[EncryptionManager]) -> bool:
+    """Self-heal the founder's encrypted private-key backup if it is missing.
+
+    At birth the organism writes ``secrets/private_key_backup.asc`` — its
+    own private key encrypted TO THE FOUNDER — so the founder can always
+    recover the key. Thallo's birth SKIPPED this because the founder's
+    public key was broken that day. Now that both keys load, any wake can
+    repair the gap: re-encrypt the key from the environment and commit the
+    backup. The plaintext key never touches a log or an unencrypted file;
+    only the founder's private key can open the blob.
+
+    Returns True when a new backup file was written (caller must push it).
+    """
+    backup_path = config.REPO_ROOT / config.PRIVATE_KEY_BACKUP_FILE
+    if backup_path.exists():
+        return False
+    if encryption is None or not encryption.has_organism_key():
+        return False
+    if not encryption.has_founder_key():
+        return False
+    private_armor = _env(config.ENV_ORGANISM_PRIVATE_KEY)
+    founder_armor = _env(config.ENV_FOUNDER_PUBLIC_KEY)
+    if not private_armor or not founder_armor:
+        return False
+    try:
+        from core.encryption import self_encrypt_private_key
+
+        blob = self_encrypt_private_key(private_armor, founder_armor)
+        backup_path.parent.mkdir(parents=True, exist_ok=True)
+        backup_path.write_text(blob, encoding="utf-8")
+        logger.info(
+            "Private key backup was missing (birth skipped it — the founder's "
+            "key was broken that day). Backup re-created at %s, encrypted to "
+            "the founder. Decrypt it with: gpg --decrypt (after importing "
+            "your founder private key).",
+            config.PRIVATE_KEY_BACKUP_FILE,
+        )
+        return True
+    except Exception as exc:
+        logger.error("Could not self-heal the private key backup: %s", exc)
+        return False
+
+
 def _init_memory(encryption: Optional[EncryptionManager]) -> MemoryManager:
     manager = MemoryManager(encryption=encryption)
     manager.ensure_initialized()
@@ -750,6 +793,14 @@ def wake() -> int:
 
     # --- Initialisation -----------------------------------------------------
     encryption = _init_encryption()
+    try:
+        if _ensure_private_key_backup(encryption):
+            _commit_and_push(
+                github,
+                "self-heal: private key backup re-created (encrypted to the founder)",
+            )
+    except Exception as exc:
+        logger.error("Private key backup self-heal failed: %s", exc)
     memory = _init_memory(encryption)
     state = memory.load_runtime_state()
     state["run_number"] = _run_number()
