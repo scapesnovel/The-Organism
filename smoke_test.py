@@ -459,6 +459,54 @@ def main() -> int:
         _cap2_ok and _ct_f.startswith("-----BEGIN PGP MESSAGE"),
     )
 
+    # --- private key backup self-heal + founder recovery -------------------
+    # Thallo's birth skipped the backup (the founder's key was broken that
+    # day), leaving the founder with no copy of the organism's private key.
+    # A wake with both keys loaded must be able to re-create the backup,
+    # and the founder must be able to recover the key from it.
+    from core.encryption import self_encrypt_private_key as _sepk
+
+    _bk_blob = _sepk(private_armor, config.IDENTITY_PUB_FILE.read_text(encoding="utf-8"))
+    check(
+        "self-heal backup blob is wrapped armor",
+        _bk_blob.startswith("-----BEGIN ORGANISM ENCRYPTED DATA-----"),
+    )
+    # 'Founder' recovery: unwrap, decrypt with the recipient's private key
+    # (here the organism key stands in for the founder key — same flow as
+    # tools/recover_private_key.py), and the result is the original key.
+    _bk_armor = enc_core.EncryptionManager.unwrap_payload(_bk_blob)
+    _rec_mgr = enc_core.EncryptionManager(workdir=tmp / "gpg_recover")
+    _rec_mgr.import_organism_private_key(private_armor)
+    _recovered = _rec_mgr.decrypt_from_self(_bk_armor)
+    check(
+        "backup decrypts back to the exact private key",
+        _recovered.strip() == private_armor.strip(),
+    )
+    _rec_mgr2 = enc_core.EncryptionManager(workdir=tmp / "gpg_recover2")
+    _rec2_ok = True
+    try:
+        _rec_mgr2.import_organism_private_key(_recovered)
+    except Exception:
+        _rec2_ok = False
+    check(
+        "recovered key imports and is usable",
+        _rec2_ok and _rec_mgr2.has_organism_key(),
+    )
+    # _ensure_private_key_backup wiring: main.py must call it in the wake
+    # cycle and it must refuse to run without both keys.
+    import main as _main_mod
+
+    _src_main = (REPO_ROOT / "main.py").read_text(encoding="utf-8")
+    check(
+        "wake cycle self-heals a missing backup",
+        "_ensure_private_key_backup(encryption)" in _src_main
+        and "self-heal: private key backup re-created" in _src_main,
+    )
+    check(
+        "self-heal refuses without an encryption manager",
+        _main_mod._ensure_private_key_backup(None) is False,
+    )
+
     print("== Finance ==")
     from self.editable.finance import financial_summary, record_income, record_expense
 
