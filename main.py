@@ -939,6 +939,19 @@ def wake() -> int:
     except Exception as exc:
         logger.error("Health checks failed: %s", exc)
 
+    # --- Issue tidying (healthy wakes only) ------------------------------------
+    # The organism closes its own served issues so the founder never has to:
+    # recovered "wake cycle failed" alerts, superseded daily reports, resolved
+    # health alerts, fulfilled key requests, expired birth announcements, and
+    # its own questions once the founder replied (reply recorded first).
+    if healthy:
+        try:
+            tidied = comms.tidy_own_issues()
+            if tidied:
+                logger.info("Closed my own served issues: %s", ", ".join(tidied))
+        except Exception as exc:
+            logger.error("Issue tidying failed: %s", exc)
+
     # --- Stage-specific work (skipped while hibernating) ---------------------
     if healthy:
         identity = memory.read_identity()

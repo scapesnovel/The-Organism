@@ -1318,6 +1318,77 @@ def main() -> int:
     )
     check("no offspring without a proposal", born3 is None)
 
+    print("== Issue lifecycle (auto-closing) ==")
+    from self.editable.communication import CommunicationManager, REPLY_MARKER
+
+    os.environ.pop(config.ENV_FOUNDER_GITHUB_USERNAME, None)
+
+    class ReplyModel:
+        @staticmethod
+        def complete(prompt, max_output_tokens=1500):
+            return "Understood, founder. Handled."
+
+    # 1) A founder issue is answered AND closed in the same wake.
+    gh_comm = FakeGitHub(issues=["hello organism, how are you?"])
+    comms_t = CommunicationManager(gh_comm, mem, None)
+    answered = comms_t.process_founder_issues(ReplyModel())
+    check("founder issue answered", answered == ["#0"])
+    check("answer carries reply marker", any(REPLY_MARKER in c for c in gh_comm.comments.get(0, [])))
+    check("answered issue auto-closed", 0 in gh_comm.closed)
+
+    # 2) An issue answered on a PREVIOUS wake (still open) is swept closed.
+    gh_prev = FakeGitHub(issues=["old question already answered"])
+    gh_prev.comments[0] = [f"{REPLY_MARKER}\nold reply"]
+    comms_prev = CommunicationManager(gh_prev, mem, None)
+    answered_prev = comms_prev.process_founder_issues(ReplyModel())
+    check("no duplicate reply to answered issue", answered_prev == [] and len(gh_prev.comments[0]) == 1)
+    check("previously answered issue swept closed", 0 in gh_prev.closed)
+
+    # 3) tidy_own_issues closes served organism issues, keeps the rest.
+    gh_tidy = FakeGitHub()
+    wake_failed = gh_tidy.create_issue("[organism] wake cycle failed", "check logs")
+    report_old = gh_tidy.create_issue("Daily report", "old report")
+    report_new = gh_tidy.create_issue("Daily report", "new report")
+    health_alert = gh_tidy.create_issue("Health alert", "problem detected")
+    key_req = gh_tidy.create_issue("API key request: Smoke (SMOKE_TIDY_KEY)", "please add")
+    decision = gh_tidy.create_issue("Decision needed (normal): spend $5", "approve?")
+    replied_q = gh_tidy.create_issue("Decision needed (normal): rename helper", "ok?")
+    gh_tidy.comments[replied_q["number"]] = ["yes, go ahead"]
+    birth_old = gh_tidy.create_issue("Birth announcement", "I am born")
+    birth_old["created_at"] = "2020-01-01T00:00:00Z"
+    relay = gh_tidy.create_issue("[relay-request] ask GPT", "please relay")
+    os.environ["SMOKE_TIDY_KEY"] = "now-configured"
+    comms_tidy = CommunicationManager(gh_tidy, mem, None)
+    tidied = comms_tidy.tidy_own_issues()
+    check("wake-failed alert closed on healthy wake", wake_failed["number"] in gh_tidy.closed)
+    check("old daily report closed", report_old["number"] in gh_tidy.closed)
+    check("newest daily report stays open", report_new["number"] not in gh_tidy.closed)
+    check("health alert closed when healthy", health_alert["number"] in gh_tidy.closed)
+    check("fulfilled key request closed", key_req["number"] in gh_tidy.closed)
+    check("unanswered Decision-needed stays open", decision["number"] not in gh_tidy.closed)
+    check("replied Decision-needed closed", replied_q["number"] in gh_tidy.closed)
+    check(
+        "founder reply recorded before closing",
+        "yes, go ahead" in mem.read("memory/core/experiences.md"),
+    )
+    check("old birth announcement closed", birth_old["number"] in gh_tidy.closed)
+    check("relay request untouched by janitor", relay["number"] not in gh_tidy.closed)
+    check(
+        "every close got a courtesy comment",
+        all(
+            any(REPLY_MARKER in c for c in gh_tidy.comments.get(n, []))
+            for n in gh_tidy.closed
+        ),
+    )
+    check("tidy summary lists closures", len(tidied) == len(gh_tidy.closed) and len(tidied) == 6)
+    os.environ.pop("SMOKE_TIDY_KEY", None)
+
+    # 4) The janitor wiring exists in the wake cycle (healthy runs only).
+    main_src = (Path(__file__).parent / "main.py").read_text(encoding="utf-8")
+    check("main.py calls tidy_own_issues on healthy wakes", "tidy_own_issues()" in main_src)
+    genesis_src = (Path(__file__).parent / "self" / "genesis" / "communication.py").read_text(encoding="utf-8")
+    check("genesis snapshot carries the janitor (survives rebirth)", "def tidy_own_issues" in genesis_src)
+
     # Cleanup
     os.environ.pop(config.ENV_ORGANISM_PRIVATE_KEY, None)
     os.environ.pop(config.ENV_KILL_PHRASE, None)

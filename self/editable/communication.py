@@ -9,6 +9,9 @@ available.
 from __future__ import annotations
 
 import logging
+import os
+import re
+from datetime import datetime, timezone
 from typing import List, Optional
 
 from core import config, loyalty
@@ -27,6 +30,12 @@ RATE_LIMIT_FALLBACK = (
 # its own comments and never answer an issue twice for the same message.
 REPLY_MARKER = "<!-- organism-reply -->"
 
+# Issue-tidying policy: the organism cleans up after itself so the founder
+# never has to close issues by hand.
+STALE_AFTER_DAYS = 7            # my own unanswered questions/reports expire
+BIRTH_ANNOUNCEMENT_AFTER_DAYS = 3  # birth setup instructions expire
+WAKE_FAILED_TITLE = "[organism] wake cycle failed"
+
 # Title prefixes of issues the organism creates itself. It must never treat
 # its own announcements/reports as founder messages to answer — that was an
 # infinite feedback loop (each reply re-triggered the workflow, which
@@ -37,6 +46,7 @@ SELF_ISSUE_PREFIXES = (
     "Daily report",
     "Health alert",
     "Decision needed",
+    "API key request:",
     "[self-modification]",
     "[organism]",
     "[relay-request]",
@@ -110,6 +120,13 @@ class CommunicationManager:
             number = issue.get("number")
             title = issue.get("title") or ""
             if self._already_answered(number):
+                # Answered on a previous wake but still open (answered before
+                # auto-closing existed, or the earlier close call failed).
+                try:
+                    self.github.close_issue(number)
+                    LOGGER.info("Closed previously answered issue #%s.", number)
+                except Exception as exc:
+                    LOGGER.warning("Could not close answered issue #%s: %s", number, exc)
                 continue
             body = self._decrypt_body(issue)
             if body is None:
@@ -136,13 +153,186 @@ class CommunicationManager:
                 response += "\n\nActions I executed from your instructions:\n" + "\n".join(
                     f"- {o}" for o in outcomes
                 )
+            response += (
+                "\n\n---\nI am closing this issue now that I have replied. "
+                "I only watch OPEN issues, so if you want to continue the "
+                "conversation please open a NEW issue (or reopen this one) "
+                "and I will answer on my next wake."
+            )
             if self.send_response(number, response):
                 sent.append(f"#{number}")
+                try:
+                    self.github.close_issue(number)
+                except Exception as exc:
+                    LOGGER.warning("Could not close answered issue #%s: %s", number, exc)
                 self.memory.record_decision(
                     f"Answered founder issue #{number} ('{title[:80]}') with encrypted response"
                     + (f" and executed {len(outcomes)} command(s)." if outcomes else ".")
+                    + " Issue closed after replying."
                 )
         return sent
+
+    # ------------------------------------------------------------------
+    # Issue tidying: the organism closes its own served issues
+    # ------------------------------------------------------------------
+    def tidy_own_issues(self) -> List[str]:
+        """Close the organism's own issues once they have served their purpose.
+
+        Called only on a HEALTHY wake. Policy:
+        - '[organism] wake cycle failed'  -> I recovered; close it.
+        - old 'Daily report' issues        -> superseded by the newest; close.
+        - 'Health alert'                   -> I am healthy again; close.
+        - 'API key request: ... (ENV)'     -> the secret now exists; close.
+        - 'Birth announcement'             -> setup instructions expire after
+                                              a few days; close.
+        - my other questions/reports       -> close once the founder replied
+                                              (reply is recorded in memory
+                                              first), or when stale — except
+                                              'Decision needed', which only
+                                              closes after a founder reply.
+        Never touched: founder-authored issues awaiting an answer,
+        [self-modification] proposals and [relay-request] issues (they are
+        closed by their own flows), KILL/RESET control issues.
+        """
+        closed: List[str] = []
+        try:
+            open_issues = [
+                i for i in self.github.list_open_issues() if not i.get("pull_request")
+            ]
+        except Exception as exc:
+            LOGGER.error("Could not list issues for tidying: %s", exc)
+            return closed
+
+        daily_reports = [
+            i for i in open_issues if "Daily report" in (i.get("title") or "")
+        ]
+        newest_report = (
+            max(int(i.get("number") or 0) for i in daily_reports)
+            if daily_reports
+            else None
+        )
+
+        for issue in open_issues:
+            number = issue.get("number")
+            title = (issue.get("title") or "").strip()
+            if number is None:
+                continue
+            # Only ever tidy issues the organism opened itself.
+            if not any(title.startswith(p) for p in SELF_ISSUE_PREFIXES):
+                continue
+            # Owned by their own lifecycles — never tidy from here.
+            if "[self-modification]" in title or title.startswith("[relay-request]"):
+                continue
+            if title.startswith("KILL:") or title.startswith("RESET:"):
+                continue
+
+            bare = title[len("[encrypted] "):] if title.startswith("[encrypted] ") else title
+            founder_replied = self._founder_commented(number)
+            note: Optional[str] = None
+
+            if title == WAKE_FAILED_TITLE or bare.startswith("wake cycle failed"):
+                note = "I completed a healthy wake cycle — this failure is resolved. Closing."
+            elif "Daily report" in title:
+                if newest_report is not None and int(number) != newest_report:
+                    note = "Superseded by a newer daily report. Closing to keep the tracker clean."
+            elif bare.startswith("Health alert"):
+                note = "I am healthy again — closing this alert."
+            elif bare.startswith("API key request:"):
+                match = re.search(r"\(([A-Z][A-Z0-9_]*)\)\s*$", title)
+                if match and os.environ.get(match.group(1), "").strip():
+                    note = (
+                        f"The {match.group(1)} secret is now configured — thank you. Closing."
+                    )
+                elif founder_replied:
+                    note = "You replied and I have recorded it. Closing."
+            elif bare.startswith("Birth announcement"):
+                if self._age_days(issue) >= BIRTH_ANNOUNCEMENT_AFTER_DAYS:
+                    note = (
+                        "My birth setup instructions have been delivered — "
+                        "closing my own announcement."
+                    )
+            else:
+                # My other reports/questions (Decision needed, ad-hoc asks...).
+                if founder_replied:
+                    note = "Received your reply — I have recorded it in my memory. Closing."
+                elif (
+                    not bare.startswith("Decision needed")
+                    and self._age_days(issue) >= STALE_AFTER_DAYS
+                ):
+                    note = (
+                        f"No reply after {STALE_AFTER_DAYS} days — closing to keep the "
+                        "tracker clean. Reopen or open a new issue anytime."
+                    )
+
+            if not note:
+                continue
+            try:
+                if founder_replied:
+                    self._record_founder_feedback(issue)
+                self.github.comment_on_issue(
+                    number, f"{REPLY_MARKER}\n{note} — {self._my_name()}"
+                )
+                self.github.close_issue(number)
+                closed.append(f"#{number}")
+            except Exception as exc:
+                LOGGER.warning("Could not tidy issue #%s: %s", number, exc)
+
+        if closed:
+            self.memory.record_decision(
+                f"Tidied my own issues: closed {', '.join(closed)}."
+            )
+        return closed
+
+    def _age_days(self, issue: dict) -> float:
+        """Age of an issue in days; 0 when created_at is missing/unreadable."""
+        created = (issue.get("created_at") or "").strip()
+        try:
+            born = datetime.strptime(created, "%Y-%m-%dT%H:%M:%SZ").replace(
+                tzinfo=timezone.utc
+            )
+            return (datetime.now(timezone.utc) - born).total_seconds() / 86400.0
+        except Exception:
+            return 0.0
+
+    def _founder_commented(self, number: int) -> bool:
+        """True when a human (non-organism, non-bot) commented on the issue."""
+        try:
+            for comment in self.github.list_issue_comments(number):
+                body = comment.get("body") or ""
+                if REPLY_MARKER in body:
+                    continue  # my own reply
+                author_type = ((comment.get("user") or {}).get("type") or "").lower()
+                author = ((comment.get("user") or {}).get("login") or "").lower()
+                if author_type == "bot" or author.endswith("[bot]"):
+                    continue
+                if body.strip():
+                    return True
+        except Exception as exc:
+            LOGGER.warning("Could not inspect comments on #%s: %s", number, exc)
+        return False
+
+    def _record_founder_feedback(self, issue: dict) -> None:
+        """Store the founder's latest reply in memory before closing."""
+        number = issue.get("number")
+        title = (issue.get("title") or "")[:120]
+        try:
+            replies = [
+                (c.get("body") or "").strip()
+                for c in self.github.list_issue_comments(number)
+                if REPLY_MARKER not in (c.get("body") or "")
+            ]
+            if replies:
+                self.memory.record_experience(
+                    f"Founder replied on my issue #{number} ('{title}'): {replies[-1][:400]}"
+                )
+        except Exception as exc:
+            LOGGER.warning("Could not record founder feedback on #%s: %s", number, exc)
+
+    def _my_name(self) -> str:
+        try:
+            return self.memory.read_identity().get("name", "The Organism")
+        except Exception:
+            return "The Organism"
 
     def compose_response(self, title: str, body: str, model_client) -> str:
         """Ask the model to compose a thoughtful reply."""
