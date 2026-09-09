@@ -18,6 +18,23 @@ LOGGER = logging.getLogger("organism.helpers")
 CREATE_THRESHOLD_FRACTION = 0.3  # 30% of processing time -> spawn a helper
 EVALUATE_AFTER_RUNS = 7          # runs before first evaluation
 MAX_HELPERS = 6                  # hard cap to stay within free-tier limits
+SIMULATED_STREAK_LIMIT = 5       # consecutive role-played runs -> flag it
+
+# Phrases that reveal a helper is claiming external actions it cannot
+# actually perform (it has no network, no chain access, no tools).
+_FANTASY_MARKERS = (
+    "verified cryptographic",
+    "verified signature",
+    "on-chain",
+    "onchain",
+    "escrow contract",
+    "merkle proof",
+    "deployed",
+    "submitted bid",
+    "contacted",
+    "quorum",
+    "payload #",
+)
 
 
 def list_helpers(memory_manager: MemoryManager) -> List[str]:
@@ -77,6 +94,15 @@ def evaluate_helpers(memory_manager: MemoryManager) -> List[str]:
             if quality == "poor":
                 terminate_helper(memory_manager, name, "consistent poor output")
                 terminated.append(name)
+                continue
+            # A helper that only role-plays external actions is not working.
+            if _simulated_streak(mem) >= 2 * SIMULATED_STREAK_LIMIT:
+                terminate_helper(
+                    memory_manager,
+                    name,
+                    "produced only simulated (role-played) work — no real output",
+                )
+                terminated.append(name)
     return terminated
 
 
@@ -86,6 +112,53 @@ def _extract_runs(mem: str) -> int:
         if line.strip().startswith("run #"):
             count += 1
     return count
+
+
+def _enforce_honesty(result: str) -> str:
+    """Ensure a KIND line exists and matches what the RESULT claims.
+
+    When the model claims external actions (verify on-chain, deploy,
+    contact...) the run is stamped SIMULATED regardless of what the model
+    said — the helper has no tools, so such claims are role-play.
+    """
+    lines = [ln for ln in (result or "").strip().splitlines() if ln.strip()]
+    kind = ""
+    claims = ""
+    for ln in lines:
+        upper = ln.strip().upper()
+        if upper.startswith("KIND:"):
+            kind = ln.split(":", 1)[1].strip().lower()
+        elif upper.startswith("RESULT:") or upper.startswith("NOTES:"):
+            claims += " " + ln.split(":", 1)[1].lower()
+    fantasy = any(marker in claims for marker in _FANTASY_MARKERS)
+    verdict = "simulated" if fantasy else (kind if kind in ("real", "simulated") else "real")
+    out = [ln for ln in lines if not ln.strip().upper().startswith("KIND:")]
+    insert_at = 1 if out and out[0].strip().upper().startswith("STATUS:") else 0
+    out.insert(insert_at, f"KIND: {verdict}")
+    return "\n".join(out)
+
+
+def _simulated_streak(mem: str) -> int:
+    """Count consecutive most-recent runs marked simulated."""
+    streak = 0
+    current_kind = None
+    kinds: List[str] = []
+    for line in mem.splitlines():
+        stripped = line.strip()
+        if stripped.startswith("run #"):
+            if current_kind is not None:
+                kinds.append(current_kind)
+            current_kind = "unknown"
+        elif stripped.upper().startswith("KIND:") and current_kind is not None:
+            current_kind = stripped.split(":", 1)[1].strip().lower()
+    if current_kind is not None:
+        kinds.append(current_kind)
+    for kind in reversed(kinds):
+        if kind == "simulated":
+            streak += 1
+        else:
+            break
+    return streak
 
 
 def _extract_quality(mem: str) -> str:
@@ -183,37 +256,81 @@ def should_spawn_helper(memory_manager: MemoryManager) -> Optional[tuple]:
     return (name, purpose[:300])
 
 
-def run_helper_cycle(memory_manager: MemoryManager, name: str, model_client) -> None:
+def run_helper_cycle(
+    memory_manager: MemoryManager, name: str, model_client, focus: str = ""
+) -> None:
     """Execute one work cycle for an existing helper.
 
     A helper reads its own memory, performs a narrow task, and appends a
-    timestamped report to its own memory file.
+    timestamped report to its own memory file. HONESTY IS ENFORCED: a
+    helper has no tools, no network and no files — it can only THINK
+    (analyse, draft, plan, decide). It must label every result REAL
+    (thinking work that truly happened: a produced draft/plan/analysis)
+    or SIMULATED (imagined interactions with external systems). Repeated
+    simulated work is flagged so the organism stops burning wakes on
+    role-play.
     """
     mem = memory_manager.read_helper_memory(name)
     if not mem:
         LOGGER.warning("Helper %s has no memory; skipping.", name)
         return
 
+    focus_line = (
+        f"THE ORGANISM'S COMMITTED EARNING FOCUS:\n{focus}\n\n"
+        "Your action must ADVANCE this focus (or your narrow purpose in "
+        "service of it).\n\n"
+        if focus
+        else ""
+    )
     prompt = (
         "You are a narrow-purpose helper agent. Your memory:\n\n"
         f"{mem[:1500]}\n\n"
-        "Perform ONE small, concrete action that advances your purpose "
-        "(observe, verify, or produce a short report). Do not touch files. "
+        f"{focus_line}"
+        "IMPORTANT — you have NO tools, NO network access and NO files. "
+        "You cannot call APIs, verify on-chain data, or contact anyone. "
+        "The ONLY real work you can do is THINKING: analyse, draft, plan, "
+        "design, evaluate. Never claim you verified/contacted/deployed "
+        "anything external — that would be fantasy.\n\n"
+        "Perform ONE small, concrete THINKING action that advances your "
+        "purpose and produces a usable artifact (a plan step, a draft, an "
+        "analysis, a decision). "
         "If your workload has grown so rich that a dedicated offspring "
         "helper would clearly capture more value, you may request one on "
         "the OFFSPRING line (most runs: '-'). "
-        "Reply with exactly four lines: "
-        "STATUS: ok|attention\nRESULT: <one sentence>\nNOTES: <one sentence>\n"
+        "Reply with exactly five lines:\n"
+        "STATUS: ok|attention\n"
+        "KIND: real|simulated  (real = thinking work you actually did here; "
+        "simulated = describes external actions you cannot perform)\n"
+        "RESULT: <one sentence>\nNOTES: <one sentence>\n"
         "OFFSPRING: <short_snake_case_name>: <narrow purpose> or '-'"
     )
     try:
-        result = model_client.complete(prompt, max_output_tokens=300)
+        result = model_client.complete(prompt, max_output_tokens=400)
     except Exception as exc:
-        result = f"STATUS: attention\nRESULT: model call failed\nNOTES: {exc}\nOFFSPRING: -"
+        result = (
+            f"STATUS: attention\nKIND: real\nRESULT: model call failed\n"
+            f"NOTES: {exc}\nOFFSPRING: -"
+        )
+    result = _enforce_honesty(result)
     runs = _extract_runs(mem) + 1
     entry = f"run #{runs} @ {config.utc_now_iso()}\n{result.strip()}\n"
     memory_manager.write_helper_memory(name, mem.rstrip() + "\n\n" + entry)
     LOGGER.info("Helper %s completed run #%s", name, runs)
+
+    # A helper stuck in fantasy is not earning — surface it as a lesson so
+    # the next strategy review sees the evidence.
+    streak = _simulated_streak(mem + "\n\n" + entry)
+    if streak >= SIMULATED_STREAK_LIMIT:
+        memory_manager.record_lesson(
+            f"Helper '{name}' produced SIMULATED (role-played) work for "
+            f"{streak} consecutive runs — it is imagining external actions "
+            "it cannot perform. Its purpose must be redefined to pure "
+            "thinking work (drafting, planning, analysis), or it should be "
+            "terminated as not earning."
+        )
+        LOGGER.warning(
+            "Helper %s has %s consecutive simulated runs — flagged.", name, streak
+        )
 
     # Reproduction: a helper may PROPOSE offspring when opportunity is rich;
     # the mother brain reviews before any birth (founder's rule: helpers

@@ -504,11 +504,14 @@ def _growth_work(memory: MemoryManager, model_client) -> None:
         terminated = evaluate_helpers(memory)
         for name in terminated:
             logger.info("Terminated underperforming helper: %s", name)
+        # choose_strategy handles commitment (7-day lock) and records the
+        # focus into world state only when it CHANGES — appending it here
+        # every wake was noise that buried the actual signal.
         focus = choose_strategy(memory)
         if focus:
-            memory.append("memory/world/state.md", f"focus_strategy: {focus}")
+            logger.info("Earning focus: %s", focus[:160])
         for name in _count_helper_names(memory):
-            run_helper_cycle(memory, name, model_client)
+            run_helper_cycle(memory, name, model_client, focus=focus)
     except Exception as exc:
         logger.error("Growth work failed: %s", exc)
 
@@ -615,6 +618,18 @@ def _daily_report(memory: MemoryManager, communication_manager) -> None:
             edit_line = f"- Recent self-edits: {edits[-300:]}\n" if edits else ""
         except Exception:
             edit_line = ""
+        try:
+            from self.editable.strategies import current_commitment
+
+            commitment = current_commitment(memory)
+            focus_line = (
+                f"- Earning focus (committed, wake {commitment.get('wakes', 0)}): "
+                f"{commitment['focus'][:300]}\n"
+                if commitment
+                else ""
+            )
+        except Exception:
+            focus_line = ""
         report = (
             f"Daily report from {name}\n\n"
             f"- Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d')} UTC\n"
@@ -622,6 +637,7 @@ def _daily_report(memory: MemoryManager, communication_manager) -> None:
             f"- Run number: {state.get('run_number', '?')}\n"
             f"- {health_line}\n"
             f"- {finance}\n"
+            f"{focus_line}"
             f"{debt_line}"
             f"{edit_line}"
             f"- Loyalty: {loyalty.loyalty_statement()}\n"
