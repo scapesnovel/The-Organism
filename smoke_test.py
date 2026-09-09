@@ -1318,6 +1318,116 @@ def main() -> int:
     )
     check("no offspring without a proposal", born3 is None)
 
+    print("== Focus commitment (no more flip-flopping) ==")
+    from self.editable import strategies as strat
+
+    # Seed a discovered opportunity so choose_strategy has material.
+    mem.write(
+        "goals/active_goals.md",
+        "# Active goals\n- Sell eBPF network monitoring tooling to service-mesh operators\n",
+    )
+    state_before = mem.load_runtime_state()
+    state_before.pop(strat.FOCUS_STATE_KEY, None)
+    mem.save_runtime_state(state_before)
+
+    class FocusModel:
+        def __init__(self):
+            self.calls = 0
+
+        def complete(self, prompt, max_output_tokens=1500):
+            self.calls += 1
+            return (
+                f"FOCUS: Sell eBPF network monitoring tooling to service-mesh operators (v{self.calls})\n"
+                "REASON: highest-scoring discovered opportunity"
+            )
+
+    import integrations.model_router as router_mod
+
+    focus_model = FocusModel()
+    orig_complete = router_mod.complete
+    router_mod.complete = focus_model.complete
+    try:
+        focus1 = strat.choose_strategy(mem)
+        check("focus chosen and valid", bool(focus1) and "eBPF" in focus1)
+        check("commitment stored", strat.current_commitment(mem) is not None)
+        check("choice recorded as commitment", "COMMITTED to earning focus" in mem.read("memory/core/decisions.md"))
+        # Second wake: must return the SAME focus WITHOUT calling the model.
+        calls_before = focus_model.calls
+        focus2 = strat.choose_strategy(mem)
+        check("committed focus reused on next wake", focus2 == focus1)
+        check("no model call during commitment window", focus_model.calls == calls_before)
+        check("wake counter increments", strat.current_commitment(mem).get("wakes") == 1)
+        # Expire the commitment -> review happens; same focus is kept.
+        commitment = strat.current_commitment(mem)
+        commitment["chosen_at"] = "2020-01-01T00:00:00Z"
+        commitment["focus"] = focus_model_focus = (
+            f"Sell eBPF network monitoring tooling to service-mesh operators (v{focus_model.calls + 1})"
+        )
+        state_now = mem.load_runtime_state()
+        state_now[strat.FOCUS_STATE_KEY] = commitment
+        mem.save_runtime_state(state_now)
+        focus3 = strat.choose_strategy(mem)
+        check("expired commitment triggers review", focus_model.calls == calls_before + 1)
+        check("review keeps identical focus (wakes preserved)",
+              focus3 == focus_model_focus and strat.current_commitment(mem).get("wakes") == 1)
+
+        # Truncated/invalid model answers never displace a committed focus.
+        commitment = strat.current_commitment(mem)
+        commitment["chosen_at"] = "2020-01-01T00:00:00Z"
+        state_now = mem.load_runtime_state()
+        state_now[strat.FOCUS_STATE_KEY] = commitment
+        mem.save_runtime_state(state_now)
+        router_mod.complete = lambda prompt, max_output_tokens=1500: "FOCUS: Building and\nREASON: x"
+        focus4 = strat.choose_strategy(mem)
+        check("truncated focus rejected, previous kept", focus4 == focus3)
+        check("_valid_focus rejects stumps", not strat._valid_focus("Building and") and not strat._valid_focus("Deploying an autonomous"))
+        check("_valid_focus accepts real sentences", strat._valid_focus("Sell eBPF monitoring tooling to mesh operators"))
+    finally:
+        router_mod.complete = orig_complete
+
+    print("== Helper honesty (no role-played work) ==")
+    from self.editable.helpers import (
+        _enforce_honesty, _simulated_streak, register_helper as _reg,
+        run_helper_cycle as _run_cycle, SIMULATED_STREAK_LIMIT,
+    )
+
+    stamped = _enforce_honesty(
+        "STATUS: ok\nRESULT: Verified cryptographic signatures for payload #1088 on-chain.\nNOTES: quorum met\nOFFSPRING: -"
+    )
+    check("fantasy claims stamped SIMULATED", "KIND: simulated" in stamped)
+    stamped2 = _enforce_honesty(
+        "STATUS: ok\nKIND: real\nRESULT: Drafted a pricing plan for the monitoring tool.\nNOTES: three tiers\nOFFSPRING: -"
+    )
+    check("honest thinking work stays real", "KIND: real" in stamped2)
+    check("missing KIND line gets added", "KIND:" in _enforce_honesty("STATUS: ok\nRESULT: analysed the market\nNOTES: ok\nOFFSPRING: -"))
+
+    sim_mem = "# Helper: h\n\n" + "\n\n".join(
+        f"run #{i} @ 2026-09-0{min(i,9)}T00:00:00Z\nSTATUS: ok\nKIND: simulated\nRESULT: x\nNOTES: y\nOFFSPRING: -"
+        for i in range(1, 6)
+    )
+    check("simulated streak counted", _simulated_streak(sim_mem) == 5)
+    check("real run breaks the streak", _simulated_streak(sim_mem + "\n\nrun #6 @ 2026-09-09T01:00:00Z\nSTATUS: ok\nKIND: real\nRESULT: z\nNOTES: w\nOFFSPRING: -") == 0)
+
+    class FantasyModel:
+        @staticmethod
+        def complete(prompt, max_output_tokens=1500):
+            return (
+                "STATUS: ok\nKIND: real\n"
+                "RESULT: Verified cryptographic signatures and Merkle proofs for payload #1088.\n"
+                "NOTES: quorum satisfied\nOFFSPRING: -"
+            )
+
+    _reg(mem, "fantasy_checker", "verify x402 disputes")
+    for _ in range(SIMULATED_STREAK_LIMIT):
+        _run_cycle(mem, "fantasy_checker", FantasyModel(), focus="sell eBPF tooling")
+    check(
+        "role-play streak surfaces as a lesson",
+        "SIMULATED (role-played) work" in mem.read("memory/core/lessons.md"),
+    )
+    helper_mem_txt = mem.read_helper_memory("fantasy_checker")
+    check("helper runs re-stamped simulated", helper_mem_txt.count("KIND: simulated") == SIMULATED_STREAK_LIMIT)
+    check("focus passed into helper prompt path (no crash)", "run #%d" % SIMULATED_STREAK_LIMIT in helper_mem_txt)
+
     print("== Issue lifecycle (auto-closing) ==")
     from self.editable.communication import CommunicationManager, REPLY_MARKER
 
