@@ -82,7 +82,12 @@ def register_helper(memory_manager: MemoryManager, name: str, purpose: str) -> N
 
 
 def evaluate_helpers(memory_manager: MemoryManager) -> List[str]:
-    """Evaluate active helpers and return names recommended for termination."""
+    """Evaluate active helpers and return names recommended for termination.
+
+    Automatically terminates helpers with poor quality or repeated role-play/simulated
+    runs without real outputs, or retargets non-earning helpers to pure analytical work
+    if they are not contributing to real outcomes.
+    """
     terminated: List[str] = []
     for name in list_helpers(memory_manager):
         mem = memory_manager.read_helper_memory(name)
@@ -95,15 +100,49 @@ def evaluate_helpers(memory_manager: MemoryManager) -> List[str]:
                 terminate_helper(memory_manager, name, "consistent poor output")
                 terminated.append(name)
                 continue
+            
             # A helper that only role-plays external actions is not working.
-            if _simulated_streak(mem) >= 2 * SIMULATED_STREAK_LIMIT:
+            # Terminate if the streak is excessively long, or automatically retarget.
+            streak = _simulated_streak(mem)
+            if streak >= 2 * SIMULATED_STREAK_LIMIT:
                 terminate_helper(
                     memory_manager,
                     name,
                     "produced only simulated (role-played) work — no real output",
                 )
                 terminated.append(name)
+                continue
+            elif streak >= SIMULATED_STREAK_LIMIT:
+                # Automate retargeting of non-earning/simulated helper to pure analytical work
+                LOGGER.info("Retargeting helper %s to pure analytical work due to simulated streak.", name)
+                _retarget_to_analytical(memory_manager, name)
+
     return terminated
+
+
+def _retarget_to_analytical(memory_manager: MemoryManager, name: str) -> None:
+    """Rewrite helper's purpose and memory guidelines to enforce analytical/drafting tasks only."""
+    mem = memory_manager.read_helper_memory(name)
+    if not mem:
+        return
+    
+    # Prepend retargeting notice to memory to redirect future runs
+    retarget_msg = (
+        f"\n\n[SYSTEM NOTICE @ {config.utc_now_iso()}]: You have been retargeted to "
+        f"PURE ANALYTICAL WORK. You must not claim any external actions. Your sole "
+        f"job is to draft, plan, analyse, and design. Do not simulate interactions.\n"
+    )
+    
+    # Update purpose in file header if possible
+    lines = mem.splitlines()
+    for i, line in enumerate(lines):
+        if line.startswith("Purpose:"):
+            lines[i] = line.strip() + " (Retargeted: pure analytical work, drafting, and planning only)"
+            break
+            
+    new_mem = "\n".join(lines) + retarget_msg
+    memory_manager.write_helper_memory(name, new_mem)
+    memory_manager.record_decision(f"Retargeted helper '{name}' to pure analytical work due to repeated simulation.")
 
 
 def _extract_runs(mem: str) -> int:
@@ -331,6 +370,8 @@ def run_helper_cycle(
         LOGGER.warning(
             "Helper %s has %s consecutive simulated runs — flagged.", name, streak
         )
+        # Automatically trigger evaluation cycle to retarget or terminate immediately
+        evaluate_helpers(memory_manager)
 
     # Reproduction: a helper may PROPOSE offspring when opportunity is rich;
     # the mother brain reviews before any birth (founder's rule: helpers

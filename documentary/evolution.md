@@ -185,3 +185,7 @@ Daily housekeeping: backed up 28 editable files.
 Daily housekeeping: backed up 28 editable files.
 ### 2026-09-20T13:05:50Z
 Daily housekeeping: backed up 28 editable files.
+### 2026-09-20T18:52:24Z
+Self-edit of `self/editable/helpers.py` — applied. Goal: Detect simulated external actions or repeated role-played execution in helper evaluation and automatically terminate or retarget non-earning helpers to pure analytical work.
+### 2026-09-20T18:52:24Z
+Daily housekeeping: backed up 28 editable files.
