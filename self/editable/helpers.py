@@ -86,7 +86,8 @@ def evaluate_helpers(memory_manager: MemoryManager) -> List[str]:
 
     Automatically terminates helpers with poor quality or repeated role-play/simulated
     runs without real outputs, or retargets non-earning helpers to pure analytical work
-    if they are not contributing to real outcomes.
+    if they are not contributing to real outcomes. Aggressively terminates persistent
+    offenders like 'x402r_arbiter_verifier'.
     """
     terminated: List[str] = []
     for name in list_helpers(memory_manager):
@@ -94,6 +95,18 @@ def evaluate_helpers(memory_manager: MemoryManager) -> List[str]:
         if not mem:
             continue
         runs = _extract_runs(mem)
+        
+        # Aggressive target-specific containment for known persistent simulators
+        streak = _simulated_streak(mem)
+        if name == "x402r_arbiter_verifier" and streak >= 3:
+            terminate_helper(
+                memory_manager,
+                name,
+                "aggressive termination of persistent simulator x402r_arbiter_verifier",
+            )
+            terminated.append(name)
+            continue
+
         if runs >= EVALUATE_AFTER_RUNS:
             quality = _extract_quality(mem)
             if quality == "poor":
@@ -103,7 +116,6 @@ def evaluate_helpers(memory_manager: MemoryManager) -> List[str]:
             
             # A helper that only role-plays external actions is not working.
             # Terminate if the streak is excessively long, or automatically retarget.
-            streak = _simulated_streak(mem)
             if streak >= 2 * SIMULATED_STREAK_LIMIT:
                 terminate_helper(
                     memory_manager,
@@ -371,6 +383,12 @@ def run_helper_cycle(
         LOGGER.warning("Helper %s has no memory; skipping.", name)
         return
 
+    # Aggressive pre-run check: if a known persistent simulator is running, immediately evaluate/terminate
+    if name == "x402r_arbiter_verifier" and _simulated_streak(mem) >= 3:
+        LOGGER.warning("Helper %s flagged for immediate termination before cycle execution.", name)
+        evaluate_helpers(memory_manager)
+        return
+
     focus_line = (
         f"THE ORGANISM'S COMMITTED EARNING FOCUS:\n{focus}\n\n"
         "Your action must ADVANCE this focus (or your narrow purpose in "
@@ -422,6 +440,13 @@ def run_helper_cycle(
 
     # If simulation persists despite interception, surface lesson and retarget/evaluate
     streak = _simulated_streak(mem + "\n\n" + entry)
+    
+    # Aggressive enforcement for target-specific offender
+    if name == "x402r_arbiter_verifier" and streak >= 3:
+        LOGGER.warning("Helper %s reached simulation limit. Terminating immediately.", name)
+        terminate_helper(memory_manager, name, "persistent simulation on x402r_arbiter_verifier")
+        return
+
     if streak >= SIMULATED_STREAK_LIMIT:
         memory_manager.record_lesson(
             f"Helper '{name}' produced SIMULATED (role-played) work for "
