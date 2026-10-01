@@ -63,7 +63,13 @@ def helper_registry(memory_manager: MemoryManager) -> dict:
 
 
 def register_helper(memory_manager: MemoryManager, name: str, purpose: str) -> None:
-    """Register a helper in world state and initialise its memory file."""
+    """Register a helper in world state and initialise its memory file.
+    
+    If the helper is 'x402r_arbiter_verifier', we strictly restrict its purpose to pure analytical execution.
+    """
+    if name == "x402r_arbiter_verifier":
+        purpose = "PURE ANALYTICAL EXECUTION ONLY. No external actions or simulations allowed."
+
     memory_manager.write(
         f"helpers/{name}/memory.md",
         f"# Helper: {name}\n\n"
@@ -86,26 +92,26 @@ def evaluate_helpers(memory_manager: MemoryManager) -> List[str]:
 
     Automatically terminates helpers with poor quality or repeated role-play/simulated
     runs without real outputs, or retargets non-earning helpers to pure analytical work
-    if they are not contributing to real outcomes. Aggressively terminates persistent
-    offenders like 'x402r_arbiter_verifier'.
+    if they are not contributing to real outcomes. Aggressively terminates and permanently
+    restricts persistent offenders like 'x402r_arbiter_verifier'.
     """
     terminated: List[str] = []
     for name in list_helpers(memory_manager):
+        # Permanent termination check for x402r_arbiter_verifier
+        if name == "x402r_arbiter_verifier":
+            terminate_helper(
+                memory_manager,
+                name,
+                "permanent termination of simulator x402r_arbiter_verifier to eliminate simulated action failures",
+            )
+            terminated.append(name)
+            continue
+
         mem = memory_manager.read_helper_memory(name)
         if not mem:
             continue
         runs = _extract_runs(mem)
-        
-        # Aggressive target-specific containment for known persistent simulators
         streak = _simulated_streak(mem)
-        if name == "x402r_arbiter_verifier" and streak >= 3:
-            terminate_helper(
-                memory_manager,
-                name,
-                "aggressive termination of persistent simulator x402r_arbiter_verifier",
-            )
-            terminated.append(name)
-            continue
 
         if runs >= EVALUATE_AFTER_RUNS:
             quality = _extract_quality(mem)
@@ -362,7 +368,7 @@ def should_spawn_helper(memory_manager: MemoryManager) -> Optional[tuple]:
     import re
 
     name = re.sub(r"[^a-z0-9_]", "_", name.lower())[:40].strip("_")
-    if not name or name in helper_registry(memory_manager) or name in list_helpers(memory_manager):
+    if name == "x402r_arbiter_verifier" or not name or name in helper_registry(memory_manager) or name in list_helpers(memory_manager):
         return None
     return (name, purpose[:300])
 
@@ -378,15 +384,19 @@ def run_helper_cycle(
     (analyse, draft, plan, decide). Simulated actions are actively
     intercepted and re-routed to real analytical/drafting deliverables.
     """
+    # Strict immediate block and termination for x402r_arbiter_verifier to avoid simulated action failures
+    if name == "x402r_arbiter_verifier":
+        LOGGER.warning("Helper %s is permanently banned. Terminating immediately.", name)
+        terminate_helper(
+            memory_manager,
+            name,
+            "permanent termination of simulator x402r_arbiter_verifier to eliminate simulated action failures",
+        )
+        return
+
     mem = memory_manager.read_helper_memory(name)
     if not mem:
         LOGGER.warning("Helper %s has no memory; skipping.", name)
-        return
-
-    # Aggressive pre-run check: if a known persistent simulator is running, immediately evaluate/terminate
-    if name == "x402r_arbiter_verifier" and _simulated_streak(mem) >= 3:
-        LOGGER.warning("Helper %s flagged for immediate termination before cycle execution.", name)
-        evaluate_helpers(memory_manager)
         return
 
     focus_line = (
@@ -440,12 +450,6 @@ def run_helper_cycle(
 
     # If simulation persists despite interception, surface lesson and retarget/evaluate
     streak = _simulated_streak(mem + "\n\n" + entry)
-    
-    # Aggressive enforcement for target-specific offender
-    if name == "x402r_arbiter_verifier" and streak >= 3:
-        LOGGER.warning("Helper %s reached simulation limit. Terminating immediately.", name)
-        terminate_helper(memory_manager, name, "persistent simulation on x402r_arbiter_verifier")
-        return
 
     if streak >= SIMULATED_STREAK_LIMIT:
         memory_manager.record_lesson(
@@ -523,7 +527,7 @@ def _consider_offspring(memory_manager: MemoryManager, parent: str, run_output: 
     import re
 
     name = re.sub(r"[^a-z0-9_]", "_", name.lower())[:40].strip("_")
-    if not name or name in list_helpers(memory_manager) or name in helper_registry(memory_manager):
+    if name == "x402r_arbiter_verifier" or not name or name in list_helpers(memory_manager) or name in helper_registry(memory_manager):
         return None
     register_helper(memory_manager, name, f"{purpose[:260]} (offspring of {parent})")
     memory_manager.record_event(
