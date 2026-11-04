@@ -22,6 +22,8 @@ SIMULATED_STREAK_LIMIT = 5       # consecutive role-played runs -> flag it
 
 # Phrases that reveal a helper is claiming external actions it cannot
 # actually perform (it has no network, no chain access, no tools).
+# Used only as a FALLBACK when verb analysis is inconclusive — designing
+# or drafting ABOUT these topics is honest thinking work.
 _FANTASY_MARKERS = (
     "verified cryptographic",
     "verified signature",
@@ -34,6 +36,33 @@ _FANTASY_MARKERS = (
     "contacted",
     "quorum",
     "payload #",
+)
+
+# Past-tense claims of PERFORMED external actions — these are fantasy no
+# matter the topic (a tool-less helper cannot have done any of them).
+_PERFORMED_RE = __import__("re").compile(
+    r"\b(verified|validated|confirmed|submitted|deployed|executed|"
+    r"contacted|sent|broadcast(?:ed)?|claimed|settled|transferred|"
+    r"minted|registered|published|launched|audited|checked)\b"
+)
+
+# Negated performed verbs ("nothing executed", "was not deployed") are
+# honest disclaimers, not fantasy — strip them before verb analysis.
+_NEGATED_PERFORMED_RE = __import__("re").compile(
+    r"\b(?:nothing|not|never|no|none|without|cannot|can't|didn't|wasn't|"
+    r"weren't|haven't|hasn't|don't|doesn't|isn't|aren't)"
+    r"(?:\s+\w+){0,2}?\s+"
+    r"(?:verified|validated|confirmed|submitted|deployed|executed|"
+    r"contacted|sent|broadcast(?:ed)?|claimed|settled|transferred|"
+    r"minted|registered|published|launched|audited|checked)\b"
+)
+
+# Leading verbs of honest THINKING work — designing/drafting/analysing
+# about external topics is real work, not role-play.
+_DESIGN_RE = __import__("re").compile(
+    r"\b(designed|drafted|specified|analy[sz]ed|defined|planned|outlined|"
+    r"formali[sz]ed|documented|mapped|model(?:l)?ed|proposed|evaluated|"
+    r"structured|researched|composed|wrote|created|developed|derived)\b"
 )
 
 
@@ -187,8 +216,19 @@ def _enforce_honesty(result: str) -> str:
             kind = ln.split(":", 1)[1].strip().lower()
         elif upper.startswith("RESULT:") or upper.startswith("NOTES:"):
             claims += " " + ln.split(":", 1)[1].lower()
-    fantasy = any(marker in claims for marker in _FANTASY_MARKERS)
-    verdict = "simulated" if fantasy else (kind if kind in ("real", "simulated") else "real")
+    # Verb analysis first: claiming to have PERFORMED an external action is
+    # fantasy; DESIGNING/DRAFTING about external topics is honest thinking
+    # work even when the topic is on-chain/crypto. The crude topic-marker
+    # list is only the fallback when neither verb class appears.
+    affirmative_claims = _NEGATED_PERFORMED_RE.sub(" ", claims)
+    if _PERFORMED_RE.search(affirmative_claims):
+        verdict = "simulated"
+    elif _DESIGN_RE.search(claims):
+        verdict = "real"
+    elif any(marker in claims for marker in _FANTASY_MARKERS):
+        verdict = "simulated"
+    else:
+        verdict = kind if kind in ("real", "simulated") else "real"
     out = [ln for ln in lines if not ln.strip().upper().startswith("KIND:")]
     insert_at = 1 if out and out[0].strip().upper().startswith("STATUS:") else 0
     out.insert(insert_at, f"KIND: {verdict}")

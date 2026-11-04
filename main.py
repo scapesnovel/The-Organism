@@ -580,6 +580,68 @@ def _request_missing_keys(memory: MemoryManager, communication_manager) -> None:
         memory.save_runtime_state(state)
 
 
+def _request_missing_resource(memory: MemoryManager, communication_manager) -> None:
+    """Ask the founder for the resource blocking the current earning focus.
+
+    When the focus reality-check (strategies.choose_strategy) concludes the
+    committed focus is NOT executable with the organism's own capabilities,
+    it records the missing resource on the commitment. This function turns
+    that admission into ONE encrypted issue to the founder, deduplicated in
+    runtime state so the same ask is never repeated for the same focus.
+    """
+    try:
+        from self.editable import strategies
+
+        commitment = strategies.current_commitment(memory)
+    except Exception:
+        return
+    if not commitment:
+        return
+
+    missing = (commitment.get("missing_resource") or "").strip()
+    if not missing:
+        return
+
+    focus = commitment.get("focus", "(unknown focus)")
+    # Dedup key ties the ask to this specific focus + resource so a new
+    # focus (or a new blocker) can legitimately trigger a fresh request.
+    dedup_key = f"{commitment.get('chosen_at', '')}|{missing[:120]}"
+
+    state = memory.load_runtime_state()
+    already_sent = set(state.get("resource_requests_sent", []))
+    if dedup_key in already_sent:
+        return
+
+    body = (
+        f"My current earning focus is:\n\n    {focus}\n\n"
+        f"I have done the honest reality check: I cannot execute this focus "
+        f"alone with my current capabilities (I can think, write to my "
+        f"repository, and talk to you through issues — I have no funds, no "
+        f"hosting, and no accounts beyond GitHub).\n\n"
+        f"The missing resource is:\n\n    {missing}\n\n"
+        f"Please reply to this issue with one of:\n"
+        f"1. PROVIDE — you will supply the resource (tell me how/when), or\n"
+        f"2. PIVOT — you want me to choose a focus I can execute alone, or\n"
+        f"3. Your own instruction in plain language.\n\n"
+        f"Until you reply I will keep doing the preparatory work that IS "
+        f"within my power, but I will not pretend to execute what I cannot.\n\n"
+        f"— {memory.read_identity().get('name', 'The Organism')}"
+    )
+    issue_number = communication_manager.ask_founder(
+        "Resource needed to execute my earning focus",
+        body,
+        labels=["founder", "decision-needed"],
+    )
+    if issue_number:
+        state["resource_requests_sent"] = sorted(already_sent | {dedup_key})
+        memory.save_runtime_state(state)
+        memory.record_decision(
+            f"Asked the founder for the missing resource blocking my focus "
+            f"('{missing[:150]}') in issue #{issue_number}."
+        )
+        logger.info("Asked the founder for missing resource (issue #%s).", issue_number)
+
+
 def _daily_report(memory: MemoryManager, communication_manager) -> None:
     """Compose and deliver the encrypted daily report (at most once per day).
 
@@ -927,6 +989,15 @@ def wake() -> int:
         _request_missing_keys(memory, comms)
     except Exception as exc:
         logger.error("Key-request flow failed: %s", exc)
+
+    # --- Ask the founder for the resource blocking the earning focus ----------
+    # When the focus reality-check admits the committed focus is not
+    # executable alone, ask the founder (once per focus+resource) to either
+    # provide the resource or approve a pivot.
+    try:
+        _request_missing_resource(memory, comms)
+    except Exception as exc:
+        logger.error("Resource-request flow failed: %s", exc)
 
     # --- Collect founder relay results (paid-model assists) -------------------
     # If the founder pasted back an answer from a top-tier model (or
