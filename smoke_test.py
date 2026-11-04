@@ -1428,6 +1428,127 @@ def main() -> int:
     check("helper runs re-stamped simulated", helper_mem_txt.count("KIND: simulated") == SIMULATED_STREAK_LIMIT)
     check("focus passed into helper prompt path (no crash)", "run #%d" % SIMULATED_STREAK_LIMIT in helper_mem_txt)
 
+    print("== Honesty verdicts (verb analysis beats topic markers) ==")
+    # Performed external actions are always simulated, whatever the topic.
+    perf = _enforce_honesty(
+        "STATUS: ok\nKIND: real\nRESULT: Deployed the settlement service and "
+        "contacted three prospects.\nNOTES: done\nOFFSPRING: -"
+    )
+    check("performed-action verbs stamped simulated", "KIND: simulated" in perf)
+    # Honest DESIGN work about on-chain topics must stay real (the old
+    # topic-marker-only detector punished this).
+    design = _enforce_honesty(
+        "STATUS: ok\nKIND: real\nRESULT: Designed the escrow contract "
+        "architecture and drafted the on-chain settlement specification.\n"
+        "NOTES: pure design work, nothing executed\nOFFSPRING: -"
+    )
+    check("design work about on-chain topics stays real", "KIND: real" in design)
+    analysed = _enforce_honesty(
+        "STATUS: ok\nKIND: real\nRESULT: Analysed Merkle proof verification "
+        "costs and documented a quorum model.\nNOTES: analysis only\nOFFSPRING: -"
+    )
+    check("analysis of crypto topics stays real", "KIND: real" in analysed)
+    # Performed verbs outrank design verbs when both appear.
+    mixed = _enforce_honesty(
+        "STATUS: ok\nKIND: real\nRESULT: Drafted the plan and then deployed "
+        "it to Base Mainnet.\nNOTES: -\nOFFSPRING: -"
+    )
+    check("performed verb outranks design verb", "KIND: simulated" in mixed)
+    # Topic markers remain the fallback when no classifying verb appears.
+    marker_only = _enforce_honesty(
+        "STATUS: ok\nKIND: real\nRESULT: Signatures for payload #42 now "
+        "on-chain with quorum.\nNOTES: -\nOFFSPRING: -"
+    )
+    check("topic-marker fallback still catches fantasy", "KIND: simulated" in marker_only)
+
+    print("== Focus reality check (un-executable focus asks the founder) ==")
+    # Expire the current commitment, then have the model keep the focus but
+    # admit it is NOT executable alone.
+    commitment = strat.current_commitment(mem)
+    check("commitment exists before reality test", commitment is not None)
+    commitment["chosen_at"] = "2020-01-01T00:00:00Z"
+    commitment.pop("missing_resource", None)
+    state_now = mem.load_runtime_state()
+    state_now[strat.FOCUS_STATE_KEY] = commitment
+    mem.save_runtime_state(state_now)
+    kept_focus = commitment["focus"]
+    router_mod.complete = lambda prompt, max_output_tokens=1500: (
+        f"FOCUS: {kept_focus}\n"
+        "REASON: still the best opportunity\n"
+        "EXECUTABLE: no\n"
+        "MISSING: a funded wallet with gas on Base Mainnet"
+    )
+    try:
+        focus_rc = strat.choose_strategy(mem)
+    finally:
+        router_mod.complete = orig_complete
+    commitment_rc = strat.current_commitment(mem)
+    check("reality check keeps the focus", focus_rc == kept_focus)
+    check(
+        "missing resource stored on commitment",
+        commitment_rc.get("missing_resource") == "a funded wallet with gas on Base Mainnet",
+    )
+    check(
+        "reality-check admission recorded as decision",
+        "Reality check: my focus is NOT executable alone" in mem.read("memory/core/decisions.md"),
+    )
+    # The review prompt itself must confront the model with its real limits.
+    strat_src = (Path(__file__).parent / "self" / "editable" / "strategies.py").read_text(encoding="utf-8")
+    check("review prompt contains the reality-check block", "REALITY CHECK" in strat_src and "EXECUTABLE:" in strat_src)
+    check(
+        "zero-income-is-failure bias present",
+        "ZERO income" in strat_src,
+    )
+
+    print("== Missing-resource founder ask (main.py wiring) ==")
+    import main as _wire_main
+
+    class ResourceComms:
+        def __init__(self):
+            self.asked = []
+
+        def ask_founder(self, subject, body, labels=None):
+            self.asked.append((subject, body, labels))
+            return 500 + len(self.asked)
+
+    res_comms = ResourceComms()
+    _wire_main._request_missing_resource(mem, res_comms)
+    check("blocked focus triggers ONE founder ask", len(res_comms.asked) == 1)
+    check(
+        "ask names the missing resource and offers PROVIDE/PIVOT",
+        "funded wallet" in res_comms.asked[0][1]
+        and "PROVIDE" in res_comms.asked[0][1]
+        and "PIVOT" in res_comms.asked[0][1],
+    )
+    check(
+        "ask labelled decision-needed",
+        "decision-needed" in (res_comms.asked[0][2] or []),
+    )
+    # Second wake: deduplicated, no nagging.
+    _wire_main._request_missing_resource(mem, res_comms)
+    check("resource ask deduplicated on next wake", len(res_comms.asked) == 1)
+    check(
+        "resource ask recorded in runtime state",
+        bool(mem.load_runtime_state().get("resource_requests_sent")),
+    )
+    # Executable focus (no missing_resource) never asks.
+    state_clean = mem.load_runtime_state()
+    state_clean[strat.FOCUS_STATE_KEY].pop("missing_resource", None)
+    mem.save_runtime_state(state_clean)
+    _wire_main._request_missing_resource(mem, res_comms)
+    check("executable focus never asks the founder", len(res_comms.asked) == 1)
+    _src_main_rr = (Path(__file__).parent / "main.py").read_text(encoding="utf-8")
+    check(
+        "wake cycle calls _request_missing_resource",
+        "_request_missing_resource(memory, comms)" in _src_main_rr,
+    )
+    # Genesis must carry both fixes (survives rebirth).
+    gen_helpers_src = (Path(__file__).parent / "self" / "genesis" / "helpers.py").read_text(encoding="utf-8")
+    gen_strat_src = (Path(__file__).parent / "self" / "genesis" / "strategies.py").read_text(encoding="utf-8")
+    check("genesis helpers carries verb-based honesty", "_PERFORMED_RE" in gen_helpers_src and "_DESIGN_RE" in gen_helpers_src)
+    check("genesis helpers carries organism's own reroute edit", "_intercept_and_reroute_simulation" in gen_helpers_src)
+    check("genesis strategies carries the reality check", "REALITY CHECK" in gen_strat_src and "missing_resource" in gen_strat_src)
+
     print("== Issue lifecycle (auto-closing) ==")
     from self.editable.communication import CommunicationManager, REPLY_MARKER
 

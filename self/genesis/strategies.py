@@ -150,7 +150,10 @@ def choose_strategy(memory_manager: MemoryManager) -> Optional[str]:
         f"YOUR CURRENT FOCUS (worked for {commitment.get('wakes', 0)} wakes): "
         f"{commitment['focus']}\n"
         "Bias strongly toward KEEPING it — switching costs you all momentum. "
-        "Switch ONLY if the lessons/income evidence shows it is failing.\n\n"
+        "Switch ONLY if the lessons/income evidence shows it is failing. "
+        "A focus that produced ZERO income across a full commitment window "
+        "despite real work IS evidence of failure — especially if the "
+        "blocker is a capability you lack.\n\n"
         if commitment
         else ""
     )
@@ -161,13 +164,31 @@ def choose_strategy(memory_manager: MemoryManager) -> Optional[str]:
         "Evidence beats ideas: anything that already produced income wins. "
         "You will be COMMITTED to this focus for "
         f"{FOCUS_COMMITMENT_DAYS} days, so choose deliberately.\n\n"
+        "REALITY CHECK — your ACTUAL capabilities, verify against them:\n"
+        "- You wake a few times per day inside GitHub Actions; you can "
+        "think, write text/code into your own repository, and talk to your "
+        "founder through GitHub issues. That is ALL.\n"
+        "- You have NO money: no gas for transactions, nothing to spend.\n"
+        "- You CANNOT deploy contracts, host services, create accounts on "
+        "external platforms, or send network requests to anything but "
+        "GitHub.\n"
+        "- Anything beyond these capabilities needs the FOUNDER to provide "
+        "it — and he must be asked explicitly.\n"
+        "A focus you cannot execute with these capabilities is a fantasy, "
+        "no matter how profitable it sounds. Prefer a focus you can start "
+        "executing THIS WEEK with thinking and writing alone; otherwise "
+        "name the ONE missing resource to request from the founder.\n\n"
         f"{previous}"
         f"DISCOVERED OPPORTUNITIES:\n{listing}\n\n"
         f"LESSONS LEARNED:\n{lessons or '(none)'}\n\n"
         f"INCOME EVIDENCE:\n{income or '(none yet)'}\n\n"
         "Reply in EXACTLY this format:\n"
         "FOCUS: <ONE COMPLETE SENTENCE restating the single chosen opportunity>\n"
-        "REASON: <one sentence>"
+        "REASON: <one sentence>\n"
+        "EXECUTABLE: yes|no  (can YOU execute this now, with thinking/"
+        "writing/GitHub alone?)\n"
+        "MISSING: <the single specific resource you need from the founder, "
+        "or '-'>"
     )
     try:
         from integrations import model_router
@@ -177,10 +198,17 @@ def choose_strategy(memory_manager: MemoryManager) -> Optional[str]:
         LOGGER.warning("Strategy choice failed: %s", exc)
         return commitment["focus"] if commitment else None
     focus = ""
+    executable = ""
+    missing = ""
     for line in (reply or "").splitlines():
-        if line.strip().upper().startswith("FOCUS:"):
-            focus = line.split(":", 1)[1].strip()
-            break
+        stripped = line.strip()
+        upper = stripped.upper()
+        if upper.startswith("FOCUS:") and not focus:
+            focus = stripped.split(":", 1)[1].strip()
+        elif upper.startswith("EXECUTABLE:"):
+            executable = stripped.split(":", 1)[1].strip().lower()
+        elif upper.startswith("MISSING:"):
+            missing = stripped.split(":", 1)[1].strip().strip("-").strip()
 
     if not _valid_focus(focus):
         if focus:
@@ -205,6 +233,15 @@ def choose_strategy(memory_manager: MemoryManager) -> Optional[str]:
         "wakes": int(commitment.get("wakes", 0)) if kept else 0,
         "reviews": int(commitment.get("reviews", 0)) + 1 if commitment else 0,
     }
+    # Reality verdict: when the brain admits the focus is not executable
+    # with current capabilities, remember the missing resource so the wake
+    # cycle can ask the founder for it (once).
+    if "no" in executable.split() and missing:
+        new_commitment["missing_resource"] = missing[:300]
+        memory_manager.record_decision(
+            f"Reality check: my focus is NOT executable alone — missing "
+            f"resource: {missing[:200]}. I will ask the founder."
+        )
     _save_commitment(memory_manager, new_commitment)
     if kept:
         memory_manager.record_decision(
